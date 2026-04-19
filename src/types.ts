@@ -31,7 +31,8 @@ export interface OutboundContext {
   name: string;
   goal: string;
   goalDesc: string;
-  phone: string; // mock member phone (for CI webhook profile update)
+  phone: string;   // mock member phone (for CI webhook profile update)
+  greeting: string; // TwiML welcome greeting — seeded into agentcore STM as turn 0
 }
 
 export interface MemberRow {

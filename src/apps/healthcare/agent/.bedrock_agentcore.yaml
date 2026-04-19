@@ -1,0 +1,62 @@
+default_agent: outreachAgent_Agent
+agents:
+  outreachAgent_Agent:
+    name: outreachAgent_Agent
+    language: python
+    node_version: null
+    entrypoint: /Users/schekka/projects/sierra-projects/healthcare-outreach-node/healthcare_outreach/agents/outreachAgent/src/main.py
+    deployment_type: direct_code_deploy
+    runtime_type: PYTHON_3_10
+    platform: linux/amd64
+    container_runtime: null
+    source_path: /Users/schekka/projects/sierra-projects/healthcare-outreach-node/healthcare_outreach/agents/outreachAgent/src
+    aws:
+      execution_role: arn:aws:iam::867484012822:role/AmazonBedrockAgentCoreSDKRuntime-us-east-1-707172926d
+      execution_role_auto_create: false
+      account: '867484012822'
+      region: us-east-1
+      ecr_repository: null
+      ecr_auto_create: false
+      s3_path: s3://bedrock-agentcore-codebuild-sources-867484012822-us-east-1
+      s3_auto_create: false
+      network_configuration:
+        network_mode: PUBLIC
+        network_mode_config: null
+      protocol_configuration:
+        server_protocol: HTTP
+      observability:
+        enabled: true
+      lifecycle_configuration:
+        idle_runtime_session_timeout: null
+        max_lifetime: null
+    bedrock_agentcore:
+      agent_id: outreachAgent_Agent-BQvVaaFKxI
+      agent_arn: arn:aws:bedrock-agentcore:us-east-1:867484012822:runtime/outreachAgent_Agent-BQvVaaFKxI
+      agent_session_id: null
+    codebuild:
+      project_name: null
+      execution_role: null
+      source_bucket: null
+    memory:
+      mode: STM_ONLY
+      memory_id: outreachAgent_Agent_mem-Odbly5BI3S
+      memory_arn: arn:aws:bedrock-agentcore:us-east-1:867484012822:memory/outreachAgent_Agent_mem-Odbly5BI3S
+      memory_name: outreachAgent_Agent_mem
+      event_expiry_days: 30
+      first_invoke_memory_check_done: true
+      was_created_by_toolkit: true
+    identity:
+      credential_providers: []
+      workload: null
+    aws_jwt:
+      enabled: false
+      audiences: []
+      signing_algorithm: ES384
+      issuer_url: null
+      duration_seconds: 300
+    authorizer_configuration: null
+    request_header_configuration: null
+    oauth_configuration: null
+    api_key_env_var_name: null
+    api_key_credential_provider_name: null
+    is_generated_by_agentcore_create: true
