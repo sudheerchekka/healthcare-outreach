@@ -30,12 +30,10 @@ export async function invokeAgent(
 ): Promise<string> {
   const agentRuntimeArn = process.env.AGENTCORE_AGENT_ARN ?? '';
 
-  // systemPrompt is baked into the deployed Python agent — log so callers know it's ignored here.
-  console.log(`[agent-agentcore-runtime] systemPrompt ignored (fixed in deployed agent), length=${systemPrompt.length}`);
-
   const payload = JSON.stringify({
     prompt: userMessage,
     context: memoryContext ?? '',
+    system_prompt: systemPrompt,
   });
 
   console.log(`[agent-agentcore-runtime] invoking agentRuntimeArn=${agentRuntimeArn} sessionId=${sessionId} prompt="${userMessage.slice(0, 80)}"`);

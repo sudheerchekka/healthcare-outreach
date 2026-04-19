@@ -67,13 +67,36 @@ export async function startTACServer(
     callbacks.onConversationSetup?.(data);
   });
 
+  // Suppress the noisy "Channel error" log when a member hangs up mid-response.
+  // The SDK emits 'error' before our onMessageReady catch can intercept it.
+  voiceChannel.on('error', ({ error }: { error: Error }) => {
+    if (error.message.includes('No active WebSocket connection')) {
+      console.log(`[tac-server] suppressed hangup error: ${error.message}`);
+      return;
+    }
+    console.error(`[tac-server] channel error: ${error.message}`);
+  });
+
   tac.onMessageReady(async ({ conversationId, message, memory, session }) => {
     const reply = await callbacks.onMessageReady({ conversationId, message, memory, session });
-    await voiceChannel.sendResponse(conversationId, reply);
+    try {
+      await voiceChannel.sendResponse(conversationId, reply);
+    } catch (e) {
+      // Member hung up before the reply could be sent — not an error worth logging as ERROR
+      if (e instanceof Error && e.message.includes('No active WebSocket connection')) {
+        console.log(`[tac-server] call ended before reply delivered convId=${conversationId}`);
+      } else {
+        throw e;
+      }
+    }
   });
 
   tac.onInterrupt(async ({ conversationId }) => {
-    await voiceChannel.sendResponse(conversationId, '');
+    try {
+      await voiceChannel.sendResponse(conversationId, '');
+    } catch (e) {
+      if (!(e instanceof Error && e.message.includes('No active WebSocket connection'))) throw e;
+    }
   });
 
   tac.onConversationEnded(async ({ session }) => {
@@ -118,6 +141,24 @@ export async function startTACServer(
     const { wsUrl, callbackUrl } = getUrls(req as any);
     const greeting = getOutboundGreeting(member, goal, desc);
     reply.type('application/xml').send(buildTwiML(wsUrl, callbackUrl, greeting, CONV_CONFIG_ID));
+  });
+
+  // CI webhook proxy — Twilio's statusCallback URL points to this server (port 8000 via ngrok),
+  // but /ci-webhook is handled by the App Server (port 8001). Forward it there.
+  fastify.post('/ci-webhook', async (req, reply) => {
+    const appPort = parseInt(process.env.APP_PORT ?? '8001', 10);
+    try {
+      const res = await fetch(`http://localhost:${appPort}/ci-webhook`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      const data = await res.json();
+      reply.status(res.status).send(data);
+    } catch (e) {
+      console.error('[tac-server] ci-webhook proxy failed:', e);
+      reply.status(500).send({ success: false });
+    }
   });
 
   // ConversationRelay callback (call-end / status)

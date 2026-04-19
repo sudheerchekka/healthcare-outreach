@@ -10,29 +10,37 @@
 import { MemberProfile, TACMemoryResponse } from './types';
 
 /** Spoken greeting injected into TwiML for outbound calls. */
-export function buildGreeting(name: string, goal: string, goalDesc: string): string {
+export function buildGreeting(name: string, goal: string, _goalDesc: string): string {
+  const topic = goal || 'your care plan';
   return (
     `Hi ${name}, this is the Owl Health Care Team calling. ` +
-    `I'm reaching out regarding ${goalDesc}. ` +
+    `I'm reaching out about ${topic}. ` +
     `Do you have a moment to chat?`
   );
 }
 
 /** System prompt for an outbound call — gives the agent purpose and member context. */
 export function buildSystemPrompt(name: string, goal: string, goalDesc: string): string {
+  const topic = goal || 'their care plan';
+  const followUpDetail = goalDesc
+    ? `Once they respond, use the following to guide your follow-up questions: ${goalDesc}`
+    : '';
   return (
     `You are an Owl Health care coordination agent making an outbound call to ${name}. ` +
-    `Purpose of this call: ${goal} — ${goalDesc}. ` +
-    `Be friendly, professional, and concise. ` +
-    `The member has already been greeted — do not re-introduce yourself. ` +
-    `Address the reason for the call directly and guide the conversation toward a clear next step.`
-  );
+    `The member has already been greeted and told this call is about ${topic} — do not re-introduce yourself or repeat that. ` +
+    `Wait for their response, then naturally guide the conversation using what you know. ` +
+    `${followUpDetail} ` +
+    `Be warm and conversational — speak in plain sentences, no bullet points, no bold text, no special formatting. ` +
+    `Keep responses brief and easy to follow on a phone call. ` +
+    `Guide the conversation toward a clear next step or action.`
+  ).trim();
 }
 
 /** System prompt for an inbound call — personalised from profile traits. */
 export function buildInboundSystemPrompt(profile: MemberProfile | null): string {
   let name: string | null = null;
   let nextFollowUp: string | null = null;
+  let nextFollowUpReason: string | null = null;
 
   if (profile?.traits) {
     const contact = profile.traits.Contact;
@@ -41,16 +49,19 @@ export function buildInboundSystemPrompt(profile: MemberProfile | null): string 
       name = [contact.firstName, contact.lastName].filter(Boolean).join(' ');
     }
     nextFollowUp = outreach?.nextFollowUp ?? null;
+    nextFollowUpReason = outreach?.nextFollowUpReason ?? null;
   }
 
   let prompt =
     'You are an Owl Health care coordination agent handling an inbound call. ' +
-    'Be warm, professional, and concise. ' +
-    'You have been provided with the customer\'s profile and a summary of past conversations above — ' +
-    'use this context to personalize your responses and avoid asking for information you already have.';
+    'Be warm and conversational — speak in plain sentences, no bullet points, no bold text, no special formatting. ' +
+    'Keep responses brief and easy to follow on a phone call. ' +
+    'You have been provided with the member\'s profile and past call summaries — ' +
+    'use this to personalize your responses and avoid asking for information you already have.';
 
   if (name) prompt += ` The member's name is ${name}.`;
-  if (nextFollowUp) prompt += ` Their next scheduled follow-up topic is: ${nextFollowUp}.`;
+  if (nextFollowUp) prompt += ` Their next scheduled follow-up is about: ${nextFollowUp}.`;
+  if (nextFollowUpReason) prompt += ` Use this to guide your questions: ${nextFollowUpReason}.`;
 
   return prompt;
 }

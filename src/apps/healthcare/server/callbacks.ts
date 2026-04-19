@@ -77,10 +77,15 @@ export function createHealthcareCallbacks(): AgentCallbacks {
           : memCtx;
         memoryContextCache.set(conversationId, enrichedContext);
         console.log(`[healthcare] memory fetched and cached for convId=${conversationId}`);
+        console.log(`[healthcare] ── enrichedContext (turn 1) ──\n${enrichedContext || '(empty)'}\n── end enrichedContext ──`);
       }
 
-      const systemPrompt = systemPromptCache.get(conversationId) ?? '';
-      console.log(`[healthcare] invoking agent convId=${conversationId} message="${message.slice(0, 60)}"`);
+      // Send system_prompt only on turn 1 (when enrichedContext is non-empty).
+      // Python saves it to STM under actor_id="system" and reloads it on turn 2+.
+      const isTurn1 = enrichedContext !== '';
+      const systemPrompt = isTurn1 ? (systemPromptCache.get(conversationId) ?? '') : '';
+      if (isTurn1) console.log(`[healthcare] ── systemPrompt (turn 1) ──\n${systemPrompt}\n── end systemPrompt ──`);
+      console.log(`[healthcare] invoking agent convId=${conversationId} turn1=${isTurn1} message="${message.slice(0, 60)}"`);
       return invokeAgent(conversationId, message, systemPrompt, enrichedContext);
     },
 

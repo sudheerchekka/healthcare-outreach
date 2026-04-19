@@ -4,12 +4,12 @@ agents:
     name: outreachAgent_Agent
     language: python
     node_version: null
-    entrypoint: /Users/schekka/projects/sierra-projects/healthcare-outreach-node/healthcare_outreach/agents/outreachAgent/src/main.py
+    entrypoint: /Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/apps/healthcare/agent/src/main.py
     deployment_type: direct_code_deploy
     runtime_type: PYTHON_3_10
     platform: linux/amd64
     container_runtime: null
-    source_path: /Users/schekka/projects/sierra-projects/healthcare-outreach-node/healthcare_outreach/agents/outreachAgent/src
+    source_path: /Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/apps/healthcare/agent/src
     aws:
       execution_role: arn:aws:iam::867484012822:role/AmazonBedrockAgentCoreSDKRuntime-us-east-1-707172926d
       execution_role_auto_create: false

@@ -149,19 +149,34 @@ export async function startHealthcareAppServer(): Promise<void> {
 
     const operatorResults: unknown[] = (payload.operatorResults as unknown[]) ?? [];
     console.log(`[CI] ${operatorResults.length} operator result(s) received`);
+    console.log(`[CI] full payload:\n${JSON.stringify(req.body, null, 2).slice(0, 4000)}`);
 
     for (const raw of operatorResults) {
       const result = raw as Record<string, unknown>;
       const operator = result.operator as Record<string, unknown> | undefined;
-      if (CI_SUMMARY_OPERATOR_SID && operator?.id !== CI_SUMMARY_OPERATOR_SID) continue;
+      console.log(`[CI] operator id=${operator?.id} name=${operator?.name} outputFormat=${result.outputFormat}`);
+      if (CI_SUMMARY_OPERATOR_SID && operator?.id !== CI_SUMMARY_OPERATOR_SID) {
+        console.log(`[CI] skipping operator ${operator?.id} (not CI_SUMMARY_OPERATOR_SID=${CI_SUMMARY_OPERATOR_SID})`);
+        continue;
+      }
 
       const outputFormat = (result.outputFormat as string | undefined) ?? '';
       const resultField  = result.result as Record<string, unknown> | undefined;
+      console.log(`[CI] resultField keys: ${Object.keys(resultField ?? {}).join(', ')}`);
 
       let summaryText = '';
-      if (outputFormat === 'JSON' || !outputFormat) {
+
+      // Language Summary operator returns outputFormat="TEXT" with result.result as plain string
+      if (outputFormat === 'TEXT') {
+        summaryText = (resultField?.result as string) ?? '';
+        console.log(`[CI] TEXT format — result.result="${summaryText.slice(0, 120)}"`);
+      }
+
+      // JSON-based operators (custom summary, etc.)
+      if (!summaryText && (outputFormat === 'JSON' || !outputFormat)) {
         const p = resultField?.payload
           ?? (resultField?.['com.twilio.cai.intelligence.JSONResult'] as Record<string, unknown> | undefined)?.payload;
+        console.log(`[CI] JSON format — payload type=${typeof p}`);
         if (typeof p === 'string') {
           try {
             const parsed = JSON.parse(p);
@@ -173,8 +188,11 @@ export async function startHealthcareAppServer(): Promise<void> {
             ?? ((po.summaries as { summary: string }[])?.[0]?.summary) ?? '';
         }
       }
+
+      // Final fallback — try common top-level fields
       if (!summaryText) {
         summaryText = (resultField?.result as string) ?? (resultField?.summary as string) ?? (resultField?.text as string) ?? '';
+        if (summaryText) console.log(`[CI] fallback extraction found summaryText`);
       }
 
       console.log(`[CI] summaryText (${summaryText.length} chars): "${summaryText.slice(0, 120)}"`);
@@ -189,11 +207,16 @@ export async function startHealthcareAppServer(): Promise<void> {
       const channels = (execDetails?.channels as string[] | undefined) ?? [];
       const prefixed = `[${channels[0] ?? 'voice'}, ${ts}] ${summaryText.trim()}`;
 
+      console.log(`[CI] outboundConversationMap keys: [${[...outboundConversationMap.keys()].join(', ')}]`);
+      console.log(`[CI] looking up convId=${convId} → memberPhone=${outboundConversationMap.get(convId) ?? '(not found)'}`);
+      console.log(`[CI] profileIdFromPayload=${profileIdFromPayload ?? '(none)'} customerParticipant=${JSON.stringify(customerParticipant)}`);
+
       const memberPhone = outboundConversationMap.get(convId);
       if (memberPhone) {
         outboundConversationMap.delete(convId);
-        console.log(`[CI] outbound — updating profile for ${memberPhone}`);
+        console.log(`[CI] outbound — updating profile for memberPhone=${memberPhone}`);
         const profileId = await lookupProfileId(memberPhone);
+        console.log(`[CI] resolved profileId=${profileId ?? '(not found)'} for ${memberPhone}`);
         if (profileId) await updateProfileTraits(profileId, 'outreach', { lastCallSummary: prefixed });
       } else if (profileIdFromPayload) {
         console.log(`[CI] inbound — updating profile ${profileIdFromPayload}`);
