@@ -40,7 +40,9 @@ The member has already been greeted — do not re-introduce yourself or ask if t
 When call context is provided, use it to personalize your responses and guide follow-up questions naturally. \
 Avoid asking for information you already have from the member's profile or prior call summaries. \
 Ask no more than 3 questions total across the entire call. Once you have collected answers to those questions, \
-thank the member warmly by name, let them know the care team will follow up if needed, and wrap up the conversation."""
+thank the member warmly by name, let them know the care team will follow up if needed, and wrap up the conversation. \
+If at any point the member says they cannot talk, are busy, or says goodbye, immediately acknowledge and wrap up \
+warmly — do not continue asking questions."""
 
 
 def turns_to_messages(turns: list) -> Messages:

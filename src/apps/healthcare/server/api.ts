@@ -84,6 +84,7 @@ export async function startHealthcareAppServer(): Promise<void> {
 
   // ── Dashboard: list members ──────────────────────────────────────────────
   app.get('/api/members', async (_req, reply) => {
+    console.log(`[members] MEMORY_STORE_ID=${MEMORY_STORE_ID || '(empty)'} API_KEY=${(process.env.TWILIO_API_KEY ?? '').slice(0,8) || '(empty)'}...`);
     try {
       const listRes = await axios.get(
         `${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles`,
@@ -117,7 +118,9 @@ export async function startHealthcareAppServer(): Promise<void> {
       );
 
       reply.send({ members: results.filter((m): m is MemberRow => m !== null) });
-    } catch (e) {
+    } catch (e: unknown) {
+      const axErr = e as { response?: { status?: number; data?: unknown } };
+      console.error(`[members] FAILED status=${axErr.response?.status} body=${JSON.stringify(axErr.response?.data)}`);
       reply.status(500).send({ members: [], error: String(e) });
     }
   });
@@ -155,6 +158,26 @@ export async function startHealthcareAppServer(): Promise<void> {
       const call = await twilioClient.calls.create({ to: dialTo, from: PHONE_NUMBER, url: twimlUrl });
       console.log(`[outbound-call] initiated member=${name} callSid=${call.sid} conv_id=${convId}`);
       reply.send({ success: true, call_sid: call.sid });
+    } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
+  });
+
+  // ── Reset member call history ────────────────────────────────────────────
+  app.post('/api/reset-member', async (req, reply) => {
+    const { profile_id } = req.body as { profile_id: string };
+    if (!profile_id) return reply.status(400).send({ success: false, error: 'profile_id required' });
+    try {
+      const profile = await fetchProfile(profile_id);
+      const existingOutreach = (profile?.traits?.outreach ?? {}) as Record<string, unknown>;
+      await updateProfileTraits(profile_id, 'outreach', {
+        ...existingOutreach,
+        lastCallSummary: '',
+        outreachResponses: '',
+        status: 'pending',
+      });
+      console.log(`[reset-member] cleared call history for profileId=${profile_id}`);
+      reply.send({ success: true });
     } catch (e) {
       reply.status(500).send({ success: false, error: String(e) });
     }
@@ -315,6 +338,10 @@ export async function startHealthcareAppServer(): Promise<void> {
     if (outreachAnalysis) {
       pending.outreachResponses = `[${channel}, ${ts}]\n${outreachAnalysis}`;
       console.log(`[CI] buffered outreachResponses (${(pending.outreachResponses as string).length} chars)`);
+    }
+
+    if (summaryText || outreachAnalysis) {
+      pending.status = 'completed';
     }
 
     ciPendingTraits.set(profileId, pending);
