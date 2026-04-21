@@ -2,17 +2,21 @@
 Owl Health outreach agent — AgentCore Runtime entry point.
 
 Deployed via: agentcore deploy (from this directory)
-Invoked by:   the Node.js app via InvokeAgentRuntimeCommand, or locally with agentcore invoke
+Invoked by:   Python TAC server via presigned AgentCore WebSocket (primary path)
+              or locally with agentcore invoke
 
-Payload shape:
-  { "prompt": "<user utterance>", "context": "<TAC memory block or empty string>" }
+WebSocket protocol (used by src/tac/server.py):
+  Receive: {"type": "prompt", "voicePrompt": "...", "systemPrompt": "...", "memoryContext": "..."}
+           {"type": "interrupt", "utterance_until_interrupt": "..."}
+  Send:    {"type": "text", "token": "...", "last": false}
+           {"type": "text", "token": "", "last": true}   ← end-of-response sentinel
 
-Short-term memory:
-  AgentCore injects AGENTCORE_MEMORY_ID at runtime (set via STM_ONLY in .bedrock_agentcore.yaml).
-  MemorySessionManager stores/retrieves conversation turns keyed by session_id (= Sierra convId),
-  so each voice call has multi-turn context across ConversationRelay turns.
+HTTP entrypoint (legacy / agentcore invoke):
+  Payload: { "prompt": "...", "context": "...", "system_prompt": "..." }
 """
 
+import asyncio
+import json
 import os
 from strands import Agent
 from strands.types.content import Messages
@@ -184,6 +188,91 @@ async def invoke(payload, context):
         log.warning(f"[STM] skipping save — MEMORY_ID not set (value='{MEMORY_ID}')")
     elif not mem_manager:
         log.warning("[STM] skipping save — mem_manager is None")
+
+
+@app.websocket
+async def handle_voice_websocket(websocket, request_context=None):
+    """
+    Persistent WebSocket handler for voice calls from the Python TAC server.
+
+    Strands Agent is created once per connection and kept alive, so all turns
+    within a call share in-memory conversation history — no STM round-trips needed.
+    The connection is closed by the TAC server when the call ends.
+    """
+    agent: Agent | None = None
+    # asyncio.Task currently streaming tokens (cancelled on interrupt)
+    stream_task: asyncio.Task | None = None
+
+    async def _stream_and_send(agent_instance: Agent, input_text: str) -> None:
+        full_reply = ""
+        try:
+            async for event in agent_instance.stream_async(input_text):
+                if "data" in event and isinstance(event["data"], str):
+                    token = event["data"]
+                    full_reply += token
+                    await websocket.send_text(json.dumps({"type": "text", "token": token, "last": False}))
+        except asyncio.CancelledError:
+            log.info("[ws] stream cancelled (interrupt)")
+            raise
+        finally:
+            # Always send the sentinel so the TAC server stops waiting
+            await websocket.send_text(json.dumps({"type": "text", "token": "", "last": True}))
+            log.info(f"[ws] stream done reply_len={len(full_reply)}")
+
+    await websocket.accept()
+    try:
+        async for raw in websocket.iter_text():
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+
+            msg_type = msg.get("type", "")
+
+            if msg_type == "prompt":
+                voice_prompt = msg.get("voicePrompt", "")
+                system_prompt = msg.get("systemPrompt", "")
+                memory_context = msg.get("memoryContext", "")
+
+                # First prompt: build the agent with effective system prompt
+                if agent is None:
+                    base_system = SYSTEM_PROMPT
+                    effective_system = f"{base_system}\n\n{system_prompt}" if system_prompt else base_system
+                    agent = Agent(model=load_model(), system_prompt=effective_system)
+                    log.info(f"[ws] agent created system_prompt_len={len(effective_system)}")
+
+                input_text = (
+                    f"[Context]\n{memory_context}\n\n[User]\n{voice_prompt}"
+                    if memory_context else voice_prompt
+                )
+                log.info(f"[ws] prompt received: {voice_prompt[:60]}")
+
+                # Cancel any in-flight stream before starting a new one
+                if stream_task and not stream_task.done():
+                    stream_task.cancel()
+                    try:
+                        await stream_task
+                    except asyncio.CancelledError:
+                        pass
+
+                stream_task = asyncio.create_task(_stream_and_send(agent, input_text))
+                await stream_task
+
+            elif msg_type == "interrupt":
+                if stream_task and not stream_task.done():
+                    stream_task.cancel()
+                    try:
+                        await stream_task
+                    except asyncio.CancelledError:
+                        pass
+                log.info("[ws] interrupt processed")
+
+    except Exception as e:
+        log.error(f"[ws] error: {e}", exc_info=True)
+    finally:
+        if stream_task and not stream_task.done():
+            stream_task.cancel()
+        log.info("[ws] connection closed")
 
 
 if __name__ == "__main__":

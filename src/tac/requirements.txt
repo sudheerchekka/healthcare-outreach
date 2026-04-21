@@ -1,0 +1,10 @@
+twilio-agent-connect @ file:///Users/schekka/.claude/cache/twilio-agent-connect-python
+bedrock-agentcore>=1.0.3
+strands-agents
+fastapi
+uvicorn[standard]
+websockets
+python-dotenv
+boto3
+requests
+httpx

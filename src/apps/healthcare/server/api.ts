@@ -8,7 +8,6 @@ import * as path from 'path';
 
 import { buildGreeting } from '../../../prompts';
 import { MemberRow, OutboundContext } from '../../../types';
-import { outboundConversationMap, setLastOutboundContext } from './state';
 import {
   normalizePhone,
   lookupProfileId,
@@ -26,6 +25,7 @@ const PHONE_NUMBER     = process.env.TWILIO_PHONE_NUMBER ?? '';
 const VOICE_DOMAIN     = (process.env.VOICE_PUBLIC_DOMAIN ?? 'NOT_SET').replace(/^https?:\/\//, '');
 const OUTBOUND_CALL_TO = process.env.OUTBOUND_CALL_TO ?? '';
 const CI_SUMMARY_OPERATOR_SID = process.env.TWILIO_TAC_CI_SUMMARY_OPERATOR_SID ?? '';
+const TAC_PORT         = parseInt(process.env.TAC_PORT ?? '8000', 10);
 
 const twilioClient = new Twilio(ACCOUNT_SID, AUTH_TOKEN);
 
@@ -101,18 +101,33 @@ export async function startHealthcareAppServer(): Promise<void> {
     const dialTo = OUTBOUND_CALL_TO || memberPhone;
     const greeting = buildGreeting(name, goal, goalDesc);
 
-    const ctx: OutboundContext = { name, goal, goalDesc, phone: memberPhone, greeting };
-    setLastOutboundContext(ctx);
+    // Use a stable conv_id based on phone + timestamp so the Python TAC server
+    // can look up the context when handle_incoming_call creates the conversation.
+    // The actual Maestro conversationId won't be known until after the call connects,
+    // so we pass conv_id as a query param on the twiml-outbound URL and the Python
+    // server reads it from the query string to look up pending context.
+    const convId = `outbound-${memberPhone}-${Date.now()}`;
+    const ctx: OutboundContext & { conv_id: string } = { conv_id: convId, name, goal, goalDesc, phone: memberPhone, greeting };
 
-    const params = new URLSearchParams({ member: name, goal, desc: goalDesc });
+    try {
+      await fetch(`http://localhost:${TAC_PORT}/set-outbound-context`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(ctx),
+      });
+    } catch (e) {
+      console.error('[outbound-call] failed to set outbound context on TAC server:', e);
+      return reply.status(500).send({ success: false, error: 'TAC server unreachable' });
+    }
+
+    const params = new URLSearchParams({ conv_id: convId });
     const twimlUrl = `https://${VOICE_DOMAIN}/twiml-outbound?${params}`;
 
     try {
       const call = await twilioClient.calls.create({ to: dialTo, from: PHONE_NUMBER, url: twimlUrl });
-      console.log(`[outbound-call] initiated member=${name} callSid=${call.sid}`);
+      console.log(`[outbound-call] initiated member=${name} callSid=${call.sid} conv_id=${convId}`);
       reply.send({ success: true, call_sid: call.sid });
     } catch (e) {
-      setLastOutboundContext(null);
       reply.status(500).send({ success: false, error: String(e) });
     }
   });
@@ -207,13 +222,20 @@ export async function startHealthcareAppServer(): Promise<void> {
       const channels = (execDetails?.channels as string[] | undefined) ?? [];
       const prefixed = `[${channels[0] ?? 'voice'}, ${ts}] ${summaryText.trim()}`;
 
-      console.log(`[CI] outboundConversationMap keys: [${[...outboundConversationMap.keys()].join(', ')}]`);
-      console.log(`[CI] looking up convId=${convId} → memberPhone=${outboundConversationMap.get(convId) ?? '(not found)'}`);
       console.log(`[CI] profileIdFromPayload=${profileIdFromPayload ?? '(none)'} customerParticipant=${JSON.stringify(customerParticipant)}`);
 
-      const memberPhone = outboundConversationMap.get(convId);
+      // Ask Python TAC server which member phone this conversation belongs to
+      let memberPhone: string | null = null;
+      try {
+        const tacRes = await fetch(`http://localhost:${TAC_PORT}/get-outbound-phone/${encodeURIComponent(convId)}`);
+        const tacData = await tacRes.json() as { phone?: string };
+        memberPhone = tacData.phone || null;
+      } catch (e) {
+        console.warn('[CI] TAC server phone lookup failed:', e);
+      }
+      console.log(`[CI] looking up convId=${convId} → memberPhone=${memberPhone ?? '(not found)'}`);
+
       if (memberPhone) {
-        outboundConversationMap.delete(convId);
         console.log(`[CI] outbound — updating profile for memberPhone=${memberPhone}`);
         const profileId = await lookupProfileId(memberPhone);
         console.log(`[CI] resolved profileId=${profileId ?? '(not found)'} for ${memberPhone}`);

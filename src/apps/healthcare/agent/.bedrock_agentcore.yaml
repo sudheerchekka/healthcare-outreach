@@ -27,7 +27,7 @@ agents:
       observability:
         enabled: true
       lifecycle_configuration:
-        idle_runtime_session_timeout: null
+        idle_runtime_session_timeout: 3600
         max_lifetime: null
     bedrock_agentcore:
       agent_id: outreachAgent_Agent-BQvVaaFKxI

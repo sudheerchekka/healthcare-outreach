@@ -1,6 +1,6 @@
-# Detailed Flow: TAC Context Collection → AgentCore Agent
+# Detailed Flow: TAC + AgentCore Voice Call
 
-Step-by-step walkthrough of how Twilio Sierra (TAC) collects context and passes it to the AgentCore Runtime agent on every voice call turn.
+Step-by-step walkthrough of how the Python TAC server collects context, pre-warms the AgentCore connection, and streams replies back through ConversationRelay on every voice call turn.
 
 ---
 
@@ -12,68 +12,65 @@ flowchart TD
         UI[members.html]
     end
 
-    subgraph AppServer["App Server · port 8001"]
+    subgraph AppServer["Node.js App Server · port 8001"]
         API[REST API\n/api/members\n/api/outbound-call\n/api/send-sms]
         CI[CI Webhook\n/ci-webhook]
     end
 
-    subgraph TACServer["TAC Server · port 8000"]
+    subgraph TACServer["Python TAC Server · port 8000"]
         TWIML[TwiML Routes\n/twiml · /twiml-outbound]
         WS[ConversationRelay WebSocket\n/ws]
+        PREWARM[_prewarm\nAgentCore WS + memory\nin parallel at setup]
+        POOL[AgentCore WS Pool\nsession_id → WebSocket]
         RELCB[/conversation-relay-callback]
+        IPC[IPC Routes\n/set-outbound-context\n/get-outbound-phone]
     end
 
-    subgraph State["In-process State (Node.js)"]
-        BRIDGE[outboundCallerToCallSid\ntwiloFrom → callSid]
-        PENDING[pendingOutboundContext\ncallSid → OutboundContext]
-        CACHES[systemPromptCache\nmemberPhoneCache · memoryContextCache\ngreetingCache · outboundConversationMap]
-    end
-
-    subgraph TAC["Twilio Sierra Platform"]
+    subgraph Twilio["Twilio"]
         VOICE[Voice API]
-        SMS[SMS API]
         RELAY[ConversationRelay\nTTS + STT]
         ORCH[Conversation Orchestrator\nconv_conversation_*]
-        MEM[Memory Store\nProfiles · Observations · Summaries]
+        MEM[TAC Memory Store\nProfiles · Observations · Summaries]
         CIOP[Conversation Intelligence\npost-call summary]
     end
 
     subgraph AgentCore["AWS AgentCore Runtime"]
-        MAIN[Strands Agent\nmain.py]
-        STM[Short-Term Memory\nwithin-call turn history]
+        MAIN[Strands Agent\nmain.py @app.websocket\nIn-memory conversation history]
     end
 
     subgraph Bedrock["AWS Bedrock"]
-        BMODEL[Claude Opus 4.6]
+        BMODEL[Claude Opus 4]
     end
 
     UI -->|load members| API
     UI -->|initiate call / send SMS| API
     API -->|read profiles| MEM
     API -->|place call| VOICE
-    API -->|send message| SMS
+    API -->|POST outbound ctx| IPC
+
     VOICE -->|fetch TwiML| TWIML
     TWIML -->|welcomeGreeting + WebSocket URL| RELAY
 
-    RELAY <-->|"real-time audio\n(STT: speech→text, TTS: text→speech)"| WS
+    RELAY <-->|"real-time audio (STT + TTS)"| WS
 
-    WS -->|"setup: from→callSid bridge"| BRIDGE
-    WS -->|"setup: stash OutboundContext"| PENDING
-    WS -->|"turn 1: resolve ctx via bridge\ncache prompt + phone"| CACHES
-    WS -->|"turn 1 only: profile lookup\n+ observations + summaries"| MEM
-    WS -->|"turn 1: enriched context + utterance\nturn 2+: utterance only"| MAIN
+    WS -->|"setup event → map outboundConvId\npopulate author_info"| PREWARM
+    PREWARM -->|"open presigned WebSocket\n(parallel)"| POOL
+    PREWARM -->|"profile lookup + observations\n+ summaries (parallel)"| MEM
 
-    MAIN <-->|load / save turn history| STM
-    MAIN -->|Converse| BMODEL
-    BMODEL -->|reply| MAIN
-    MAIN -->|streaming reply| WS
-    WS -->|text token| RELAY
+    WS -->|"prompt/interrupt"| POOL
+    POOL <-->|"persistent WebSocket\ntoken stream"| MAIN
+    MAIN -->|LLM inference| BMODEL
+    BMODEL -->|streaming reply| MAIN
+    MAIN -->|token stream| POOL
+    POOL -->|tokens| WS
+    WS -->|text tokens| RELAY
 
     RELAY -->|call ends| RELCB
     RELCB -->|close conversation| ORCH
     ORCH -->|trigger CI| CIOP
     CIOP -->|summary webhook| CI
-    CI -->|"PATCH lastCallSummary\n(next call picks this up)"| MEM
+    CI -->|GET /get-outbound-phone| IPC
+    CI -->|write lastCallSummary| MEM
 ```
 
 ---
@@ -89,18 +86,28 @@ POST /api/outbound-call  (App Server port 8001)
 { name: "Maria", phone: "+1408...", goal: "PCP_PREP", goalDesc: "Prepare for PCP visit" }
 ```
 
-**Step 2 — App Server stashes call context**
-
-```typescript
-lastOutboundContext = { name: "Maria", goal, goalDesc, phone: "+1408...", greeting: "Hi Maria..." }
-```
-
-The greeting text is built here and stashed — it will be injected into the agent context on turn 1.
-
-**Step 3 — Twilio places the outbound call**
+**Step 2 — App Server sends outbound context to Python TAC server**
 
 ```
-twilioClient.calls.create({ to: "+1408...", from: "+1888...", url: /twiml-outbound?member=Maria&... })
+POST http://localhost:8000/set-outbound-context
+{
+  conv_id:  "outbound-+1408...-1713456789000",   ← generated key
+  name:     "Maria",
+  goal:     "PCP_PREP",
+  goalDesc: "Prepare for PCP visit",
+  phone:    "+1408...",
+  greeting: "Hi Maria, this is Owl Health calling about your upcoming PCP visit..."
+}
+```
+
+**Step 3 — App Server places the outbound call via Twilio REST API**
+
+```
+twilioClient.calls.create({
+  to:  "+1408...",
+  from: "+1888...",
+  url: "https://<ngrok>/twiml-outbound?conv_id=outbound-+1408...-1713456789000"
+})
 ```
 
 ---
@@ -109,217 +116,205 @@ twilioClient.calls.create({ to: "+1408...", from: "+1888...", url: /twiml-outbou
 
 **Step 4 — Twilio fetches TwiML**
 
-`POST /twiml-outbound` (TAC Server port 8000) returns:
+`POST /twiml-outbound?conv_id=...` returns:
 ```xml
-<ConversationRelay url="wss://.../ws" welcomeGreeting="Hi Maria..."/>
+<ConversationRelay
+  url="wss://<ngrok>/ws"
+  welcomeGreeting="Hi Maria, this is Owl Health calling..."
+/>
 ```
-Twilio speaks the greeting via TTS to Maria before the WebSocket opens.
+
+The `outboundConvId` is embedded as a `<Parameter>` in the TwiML so it appears in the ConversationRelay `setup` message.
 
 **Step 5 — Conversation Orchestrator creates a Sierra conversation**
 
-Because the outbound capture rule (`from=+1888...`, `to=*`) is configured, Sierra automatically creates `conv_conversation_*` and associates it with the call. This enables Conversation Intelligence to write the post-call summary back to TAC Memory.
+Because the outbound capture rule (`from=+1888...`, `to=*`) is configured, Twilio automatically creates `conv_conversation_*` and associates it with the call. This enables Conversation Intelligence to write the post-call summary to the Memory Store.
 
 **Step 6 — ConversationRelay opens the WebSocket — `setup` event**
 
 ```
-setup event: { callSid: "CA...", from: "+1888..." (Twilio), to: "+1408..." (Maria) }
+setup: {
+  from: "+1888...",   to: "+1408...",
+  customParameters: {
+    conversationId: "conv_conversation_01kph...",   ← Maestro ID
+    profileId:      "mem_profile_abc...",
+    outboundConvId: "outbound-+1408...-1713456789000"   ← our key
+  }
+}
 ```
 
-`onConversationSetup` fires and stores two entries:
-```typescript
-pendingOutboundContext.set("CA...", ctx)       // callSid → OutboundContext
-outboundCallerToCallSid.set("+1888...", "CA...") // twilioFrom → callSid
+`OwlVoiceChannel._handle_setup` fires and does three things:
+1. Maps `outboundConvId → conv_conversation_01kph...` so `handle_message_ready` finds the pending context
+2. Sets `author_info.address = "+1408..."` (member's phone, from `to` on outbound)
+3. Fires `_prewarm(conv_id, session_id, phone)` as a background task
+
+**Step 7 — Pre-warm: AgentCore WebSocket + memory fetch run in parallel**
+
+While Twilio is speaking the greeting to Maria:
+```
+Task A: generate_presigned_url(runtime_arn, session_id)
+        → websockets.connect(presigned_url)       ← AgentCore WS open
+
+Task B: POST /Profiles/Lookup { phone: "+1408..." }  → profileId
+        GET  /Profiles/{id}/Observations
+        GET  /Profiles/{id}/ConversationSummaries
+        → memory_context_cache[conv_id] = built context string
 ```
 
-The Twilio `from` number (+1888...) is used as the bridge key because `session.authorInfo.address` in `onMessageReady` is set to the `from` number by the TAC SDK.
+Both complete during the greeting — by the time Maria says her first word, the WebSocket is open and memory is cached.
 
 ---
 
 ### Phase 3 — First member utterance (turn 1)
 
-**Step 7 — Member speaks → Twilio transcribes**
+**Step 8 — Maria speaks → Twilio transcribes**
 
 ```
-prompt event: { transcript: "Yes.", last: true }
+prompt event: { voicePrompt: "Yes, I have a question about my appointment.", last: true }
 ```
 
-`session.authorInfo.address` = `"+1888..."` (Twilio's number — the call `from`).
-
-**Step 8 — Resolve outbound context via the bridge**
-
-```typescript
-const callSid = outboundCallerToCallSid.get("+1888...")  // → "CA..."
-const ctx     = pendingOutboundContext.get("CA...")       // → { name: "Maria", phone: "+1408...", ... }
-```
-
-Both maps are cleared after use. Context is applied:
-```typescript
-systemPromptCache.set(convId, buildSystemPrompt("Maria", "PCP_PREP", "..."))
-greetingCache.set(convId, "Hi Maria, this is Owl Health Care Team...")
-outboundConversationMap.set(convId, "+1408...")   // for CI webhook routing
-memberPhoneCache.set(convId, "+1408...")           // for Memory Store lookup
-```
-
----
-
-### Phase 4 — TAC Memory lookup (turn 1 only)
-
-**Step 9 — Look up the member's profile ID**
-
-```
-POST https://memory.twilio.com/v1/Stores/{store_id}/Profiles/Lookup
-{ idType: "phone", value: "+1408..." }
-→ profileId: "mem_profile_*"
-```
-
-**Step 10 — Fetch long-term memory (parallel)**
-
-```
-GET /v1/Stores/{id}/Profiles/{profileId}/Observations
-→ ["Member prefers morning calls", "Has diabetes type 2", ...]
-
-GET /v1/Stores/{id}/Profiles/{profileId}/ConversationSummaries
-→ ["[voice, Apr 15] Confirmed PCP appointment...", ...]
-```
-
-**Step 11 — Build enriched context**
-
-```
-[Greeting already spoken to member]
-Hi Maria, this is the Owl Health Care Team calling. I'm reaching out regarding...
-
-# Customer Context
-## Key Observations
-- Member prefers morning calls
-- Has diabetes type 2
-
-## Previous Call Summaries
-- [voice, Apr 15] Confirmed PCP appointment...
-```
-
-The greeting is prepended so the agent knows it already introduced itself.
-
-> **Turn 2+ — cache hit**: `memoryContextCache` already has an entry for this `convId` → `enrichedContext = ''`. The full enriched context was stored in AgentCore STM on turn 1 (Step 16), so the agent loads it from history. No Memory Store API calls after the first turn.
-
----
-
-### Phase 5 — Call AgentCore Runtime
-
-**Step 12 — Invoke AgentCore Runtime**
-
-```typescript
-InvokeAgentRuntimeCommand({
-  agentRuntimeArn: "arn:aws:bedrock-agentcore:...",
-  runtimeSessionId: "conv_conversation_01kph...",   // Sierra convId = STM session key
-  payload: {
-    prompt:  "Yes.",                                 // member's words
-    context: "[Greeting already spoken...]\n..."     // TAC long-term memory + greeting (turn 1 only)
-  }
-})
-```
-
-**Step 13 — AgentCore Runtime loads short-term memory**
+**Step 9 — `handle_message_ready` fires (turn 1)**
 
 ```python
-MemorySessionManager.get_last_k_turns(
-  actor_id="agent",
-  session_id="conv_conversation_01kph..."
-)
-# turn 1 → [] (empty — first turn)
-# turn 2 → [{ role: "user", text: "[Context]\n...\n\n[User]\nYes." },
-#            { role: "assistant", text: "Great, thanks Maria!..." }]
+ctx = pending_outbound_context.pop("conv_conversation_01kph...")
+# → { name: "Maria", goal: "PCP_PREP", phone: "+1408...", greeting: "Hi Maria..." }
+
+system_prompt = "You are calling Maria on behalf of the Owl Health care team.
+                 The purpose of this call is: PCP_PREP. ..."
+
+enriched = memory_context_cache["conv_conversation_01kph..."]
+# → "[Greeting already spoken]\nHi Maria...\n\n### Previous Observations\n- ..."
 ```
 
-**Step 14 — Strands Agent builds input and calls Bedrock**
+Memory is already in cache from Step 7 — no API call on the critical path.
+
+**Step 10 — Send prompt to AgentCore via pooled WebSocket**
+
+```json
+{
+  "type":         "prompt",
+  "voicePrompt":  "Yes, I have a question about my appointment.",
+  "systemPrompt": "You are calling Maria on behalf of the Owl Health care team...",
+  "memoryContext": "[Greeting already spoken]\nHi Maria...\n\n### Previous Observations\n..."
+}
+```
+
+The WebSocket was opened in Step 7 — no TLS handshake on the critical path.
+
+**Step 11 — Strands Agent processes the prompt**
 
 ```python
-input_text = "[Context]\n<enrichedContext>\n\n[User]\nYes."
+# Agent is created once per WebSocket connection — in-memory history for the whole call
+agent = Agent(model=load_model(), system_prompt=effective_system_prompt)
+input_text = "[Context]\n<enrichedContext>\n\n[User]\nYes, I have a question..."
 ```
 
 Bedrock receives:
-- **System prompt** → "You are Owl Health agent. Member already greeted..."
-- **Prior turns** (turn 2+) → conversation history from AgentCore STM (includes context from turn 1)
-- **Current message** → `input_text`
+- **System prompt** — agent persona + per-call context (member name, goal)
+- **In-memory history** — all prior turns in this call (turn 2+)
+- **Current message** — `input_text`
 
-**Step 15 — Reply streams back**
+**Step 12 — Reply streams back token by token**
 
 ```
-main.py yields SSE chunks
-  → Node.js collects and sends: socket.send({ type: 'text', token: reply, last: true })
-  → Twilio TTS speaks reply to Maria
+AgentCore → TAC server → ConversationRelay → Twilio TTS → Maria's ear
 ```
 
-**Step 16 — AgentCore saves this turn to STM**
+Token-by-token streaming means Twilio begins speaking before the full reply is generated.
+
+---
+
+### Phase 4 — Turn 2+ (same call)
+
+The Strands `Agent` object stays alive in memory for the lifetime of the WebSocket connection. No STM API calls, no memory fetches.
 
 ```python
-MemorySessionManager.add_turns(
-  session_id="conv_conversation_01kph...",
-  messages=[
-    ConversationalMessage(
-      text="[Context]\n[Greeting...]\n# Customer Context\n...\n\n[User]\nYes.",
-      role=USER
-    ),
-    ConversationalMessage(text="Great, thanks Maria!...", role=ASSISTANT),
-  ]
-)
+# handle_message_ready turn 2+:
+is_turn1 = False
+enriched = ""          # no context re-injection
+system_prompt = ""     # not re-sent
+
+# Agent already has full history in-memory from all prior turns
 ```
 
-The full `input_text` (not just the raw utterance) is stored so turn 2+ loads the TAC context from STM history — no repeat Memory Store fetches needed.
+The same pooled WebSocket is reused. Latency is just model inference + streaming.
+
+---
+
+### Phase 5 — Interruption
+
+If Maria speaks while the agent is mid-reply:
+
+```json
+{ "type": "interrupt", "utterance_until_interrupt": "Actually I wanted to..." }
+```
+
+The TAC server forwards this to the AgentCore WebSocket. The `handle_voice_websocket` handler in `main.py` cancels the in-flight `stream_async` task and sends the end-of-stream sentinel immediately, unblocking the TAC server to handle the new prompt.
 
 ---
 
 ### Phase 6 — Call ends (post-call)
 
-**Step 17 — Maria hangs up**
+**Step 13 — Maria hangs up**
 
 ```
 POST /conversation-relay-callback { Status: "completed" }
-→ Conversation Orchestrator closes conv_conversation_01kph...
 ```
 
-Closing the conversation signals Sierra to run Conversation Intelligence on the recording.
+`handle_conversation_ended` fires: closes the AgentCore WebSocket, clears all caches for this `conv_id`.
 
-**Step 18 — Conversation Intelligence processes the recording**
+**Step 14 — Conversation Intelligence processes the recording**
 
 ```
-POST /ci-webhook  (App Server port 8001)
-{ operatorResults: [{ result: { payload: '{"summary":"..."}' }, executionDetails: { ... } }] }
+POST /ci-webhook  (TAC server port 8000 → proxied to App Server port 8001)
+{ operatorResults: [{ result: { payload: '{"summary":"..."}' } }] }
 ```
 
-**Step 19 — App Server writes summary back to TAC Memory**
+**Step 15 — App Server resolves member phone and writes summary**
 
-```typescript
-outboundConversationMap.get("conv_conversation_01kph...") → "+1408..."
-POST /Profiles/Lookup → profileId
+```
+GET http://localhost:8000/get-outbound-phone/conv_conversation_01kph...
+→ { phone: "+1408..." }
+
+POST /Profiles/Lookup { phone: "+1408..." } → profileId
 PATCH /Profiles/{profileId}
-  { traits: { outreach: { lastCallSummary: "[voice, Apr 18] ..." } } }
+  { traits: { outreach: { lastCallSummary: "[voice, Apr 20] ..." } } }
 ```
 
-On Maria's **next** call this summary is fetched in Step 10 and injected into the agent's context. The loop is complete.
+On Maria's **next** call this summary is fetched in Step 7 and injected into the agent's context. The loop is complete.
 
 ---
 
 ## Memory Layers
 
-| Layer | Provider | Scope | Used for |
+| Layer | Provider | Scope | How it's used |
 |---|---|---|---|
-| Long-term | TAC Memory Store | Across calls | Member profile, past summaries, observations — fetched once on turn 1 |
-| Short-term | AgentCore STM | Within a single call | Turn history including enriched context; eliminates repeat TAC fetches |
+| Long-term | TAC Memory Store | Across calls | Fetched once at call setup (Step 7) — observations, summaries, profile traits |
+| In-memory | Strands Agent object | Within a single call | Full turn history; agent stays alive for WebSocket lifetime — no STM API calls |
 
 ## Server Responsibilities
 
 | Server | Port | Routes | Role |
 |---|---|---|---|
-| **TAC Server** | 8000 | `/twiml`, `/twiml-outbound`, `/ws`, `/conversation-relay-callback` | Twilio-facing: TwiML, ConversationRelay WebSocket, call lifecycle |
-| **App Server** | 8001 | `/api/members`, `/api/outbound-call`, `/api/send-sms`, `/ci-webhook` | Dashboard API, CI webhook, TAC Memory read/write |
+| **Python TAC Server** | 8000 | `/twiml`, `/twiml-outbound`, `/ws`, `/conversation-relay-callback`, `/set-outbound-context`, `/get-outbound-phone`, `/ci-webhook` | Twilio-facing: TwiML, ConversationRelay WebSocket, pre-warm, AgentCore pool, IPC |
+| **Node.js App Server** | 8001 | `/api/members`, `/api/outbound-call`, `/api/send-sms`, `/ci-webhook` | Dashboard API, CI webhook, TAC Memory read/write |
 
 ## TAC Component Roles
 
 | TAC Component | Steps | What it provides |
 |---|---|---|
-| **Conversation Orchestrator** | 5, 8 | Links `callSid` → `conv_conversation_*`; enables CI |
-| **Memory Store — Profiles** | 9 | Resolves phone number → `profileId` |
-| **Memory Store — Observations** | 10 | Long-term facts about the member |
-| **Memory Store — Summaries** | 10 | Past call summaries |
-| **Conversation Intelligence** | 18, 19 | Auto-generates post-call summary, written back to Memory Store |
-| **ConversationRelay** | 4, 6, 7, 15 | Real-time STT (speech → text) and TTS (text → speech) |
+| **Conversation Orchestrator** | 5 | Links call → `conv_conversation_*`; enables CI |
+| **Memory Store — Profiles** | 7, 15 | Resolves phone number → `profileId` |
+| **Memory Store — Observations** | 7 | Long-term facts about the member |
+| **Memory Store — Summaries** | 7 | Past call summaries |
+| **Conversation Intelligence** | 14, 15 | Auto-generates post-call summary → written back to Memory Store |
+| **ConversationRelay** | 4, 6, 8, 12 | Real-time STT (speech → text) and TTS (text → speech) |
+
+## Latency Profile
+
+| Event | What's happening | Added latency |
+|---|---|---|
+| Call setup (greeting playing) | AgentCore WS open + memory fetch — parallel | ~0ms on turn 1 critical path |
+| Turn 1 first token | Prompt sent on pre-opened WS → Bedrock inference → first token | Model TTFT only |
+| Turn 2+ first token | Same WS reused, in-memory history, no API calls | Model TTFT only |
+| Interrupt | In-flight stream cancelled, sentinel sent immediately | <10ms |
