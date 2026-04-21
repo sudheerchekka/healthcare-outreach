@@ -24,10 +24,37 @@ const AUTH_TOKEN       = process.env.TWILIO_TAC_AUTH_TOKEN ?? '';
 const PHONE_NUMBER     = process.env.TWILIO_TAC_PHONE_NUMBER ?? '';
 const VOICE_DOMAIN     = (process.env.VOICE_PUBLIC_DOMAIN ?? 'NOT_SET').replace(/^https?:\/\//, '');
 const OUTBOUND_CALL_TO = process.env.OUTBOUND_CALL_TO ?? '';
-const CI_SUMMARY_OPERATOR_SID = process.env.TWILIO_TAC_CI_SUMMARY_OPERATOR_SID ?? '';
+const CI_SUMMARY_OPERATOR_SID  = process.env.TWILIO_TAC_CI_SUMMARY_OPERATOR_SID ?? '';
+const CI_OUTREACH_OPERATOR_SID = process.env.TWILIO_TAC_CI_OUTREACH_OPERATOR_SID ?? '';
 const TAC_PORT         = parseInt(process.env.TAC_PORT ?? '8000', 10);
 
 const twilioClient = new Twilio(ACCOUNT_SID, AUTH_TOKEN);
+
+// ── CI write debouncer ──────────────────────────────────────────────────────
+// Both CI operators fire separate webhooks within milliseconds. Without debouncing,
+// whichever writes second reads a stale profile (before the first write landed) and
+// overwrites the first update. We buffer trait updates per profileId for 3s then flush once.
+const ciPendingTraits = new Map<string, Record<string, unknown>>();
+const ciFlushTimers   = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleCIFlush(profileId: string): void {
+  const existing = ciFlushTimers.get(profileId);
+  if (existing) clearTimeout(existing);
+  ciFlushTimers.set(profileId, setTimeout(async () => {
+    const traits = ciPendingTraits.get(profileId);
+    ciPendingTraits.delete(profileId);
+    ciFlushTimers.delete(profileId);
+    if (!traits) return;
+    try {
+      const profile = await fetchProfile(profileId);
+      const existingOutreach = (profile?.traits?.outreach ?? {}) as Record<string, unknown>;
+      await updateProfileTraits(profileId, 'outreach', { ...existingOutreach, ...traits });
+      console.log(`[CI] flushed profileId=${profileId} traits=${Object.keys(traits).join(', ')}`);
+    } catch (e) {
+      console.error(`[CI] flush FAILED profileId=${profileId}:`, e);
+    }
+  }, 3000));
+}
 
 function formatTimestampPST(dateStr: string | undefined): string {
   const date = dateStr ? new Date(dateStr) : new Date();
@@ -82,6 +109,7 @@ export async function startHealthcareAppServer(): Promise<void> {
               next_follow_up: outreach.nextFollowUp ?? '',
               next_follow_up_reason: outreach.nextFollowUpReason ?? '',
               status: outreach.status ?? 'pending',
+              outreach_responses: outreach.outreachResponses ?? '',
               last_call_summary: outreach.lastCallSummary ?? '',
             };
           } catch { return null; }
@@ -159,95 +187,139 @@ export async function startHealthcareAppServer(): Promise<void> {
     const eventType = payload.event ?? payload.status ?? payload.EventType ?? '(unknown)';
     console.log(`[CI WEBHOOK] event=${eventType} convId=${convId}`);
 
-    // -- Verbose debug logs (uncomment to troubleshoot) --
-    // console.log(`[CI WEBHOOK] full payload:\n${JSON.stringify(req.body, null, 2).slice(0, 2000)}`);
-
     const operatorResults: unknown[] = (payload.operatorResults as unknown[]) ?? [];
     console.log(`[CI] ${operatorResults.length} operator result(s) received`);
-    console.log(`[CI] full payload:\n${JSON.stringify(req.body, null, 2).slice(0, 4000)}`);
+    console.log(`[CI] config: SUMMARY_SID=${CI_SUMMARY_OPERATOR_SID || '(not set)'} OUTREACH_SID=${CI_OUTREACH_OPERATOR_SID || '(not set)'}`);
+    console.log(`[CI] operator ids in payload: ${operatorResults.map(r => ((r as Record<string,unknown>)?.operator as Record<string,unknown>)?.id ?? '?').join(', ')}`);
+
+    // Resolve member profile once for the whole webhook payload
+    let profileId: string | null = null;
+
+    // Ask Python TAC server which member phone this conversation belongs to (outbound)
+    let memberPhone: string | null = null;
+    try {
+      const tacRes = await fetch(`http://localhost:${TAC_PORT}/get-outbound-phone/${encodeURIComponent(convId)}`);
+      const tacData = await tacRes.json() as { phone?: string };
+      memberPhone = tacData.phone || null;
+    } catch (e) {
+      console.warn('[CI] TAC server phone lookup failed:', e);
+    }
+
+    if (memberPhone) {
+      profileId = await lookupProfileId(memberPhone);
+      console.log(`[CI] outbound convId=${convId} phone=${memberPhone} profileId=${profileId ?? '(not found)'}`);
+    }
+
+    // Collect updates from all recognized operators, then write once
+    let summaryText = '';
+    let outreachAnalysis = '';
 
     for (const raw of operatorResults) {
       const result = raw as Record<string, unknown>;
       const operator = result.operator as Record<string, unknown> | undefined;
-      console.log(`[CI] operator id=${operator?.id} name=${operator?.name} outputFormat=${result.outputFormat}`);
-      if (CI_SUMMARY_OPERATOR_SID && operator?.id !== CI_SUMMARY_OPERATOR_SID) {
-        console.log(`[CI] skipping operator ${operator?.id} (not CI_SUMMARY_OPERATOR_SID=${CI_SUMMARY_OPERATOR_SID})`);
-        continue;
+      const operatorId = (operator?.id as string | undefined) ?? '';
+      console.log(`[CI] operator id=${operatorId} name=${operator?.name}`);
+
+      // Inbound fallback: resolve profile from participant if TAC phone lookup missed
+      if (!profileId) {
+        const execDetails = result.executionDetails as Record<string, unknown> | undefined;
+        const participants = (execDetails?.participants as { id: string; profileId?: string; type: string }[]) ?? [];
+        const customer = participants.find(p => p.type === 'CUSTOMER');
+        if (customer?.profileId) {
+          profileId = customer.profileId;
+          console.log(`[CI] inbound profileId=${profileId}`);
+        }
       }
 
       const outputFormat = (result.outputFormat as string | undefined) ?? '';
       const resultField  = result.result as Record<string, unknown> | undefined;
-      console.log(`[CI] resultField keys: ${Object.keys(resultField ?? {}).join(', ')}`);
 
-      let summaryText = '';
+      const isOutreachOp = CI_OUTREACH_OPERATOR_SID && operatorId === CI_OUTREACH_OPERATOR_SID;
+      const isSummaryOp  = !isOutreachOp && (CI_SUMMARY_OPERATOR_SID ? operatorId === CI_SUMMARY_OPERATOR_SID : true);
+      console.log(`[CI] classification: isSummaryOp=${isSummaryOp} isOutreachOp=${isOutreachOp}`);
 
-      // Language Summary operator returns outputFormat="TEXT" with result.result as plain string
-      if (outputFormat === 'TEXT') {
-        summaryText = (resultField?.result as string) ?? '';
-        console.log(`[CI] TEXT format — result.result="${summaryText.slice(0, 120)}"`);
+      // ── Summary operator ──────────────────────────────────────────────────
+      if (isSummaryOp && !summaryText) {
+        if (outputFormat === 'TEXT') {
+          summaryText = (resultField?.result as string) ?? '';
+        }
+        if (!summaryText) {
+          const p = resultField?.payload
+            ?? (resultField?.['com.twilio.cai.intelligence.JSONResult'] as Record<string, unknown> | undefined)?.payload;
+          if (typeof p === 'string') {
+            try { const parsed = JSON.parse(p); summaryText = parsed?.summary ?? parsed?.summaries?.[0]?.summary ?? parsed?.text ?? ''; }
+            catch { summaryText = p; }
+          } else if (typeof p === 'object' && p !== null) {
+            const po = p as Record<string, unknown>;
+            summaryText = (po.summary as string) ?? (po.text as string) ?? ((po.summaries as { summary: string }[])?.[0]?.summary) ?? '';
+          }
+        }
+        if (!summaryText) {
+          summaryText = (resultField?.result as string) ?? (resultField?.summary as string) ?? (resultField?.text as string) ?? '';
+        }
+        console.log(`[CI] summary extracted: ${summaryText.length} chars`);
       }
 
-      // JSON-based operators (custom summary, etc.)
-      if (!summaryText && (outputFormat === 'JSON' || !outputFormat)) {
-        const p = resultField?.payload
-          ?? (resultField?.['com.twilio.cai.intelligence.JSONResult'] as Record<string, unknown> | undefined)?.payload;
-        console.log(`[CI] JSON format — payload type=${typeof p}`);
-        if (typeof p === 'string') {
-          try {
-            const parsed = JSON.parse(p);
-            summaryText = parsed?.summary ?? parsed?.summaries?.[0]?.summary ?? parsed?.text ?? '';
-          } catch { summaryText = p; }
-        } else if (typeof p === 'object' && p !== null) {
-          const po = p as Record<string, unknown>;
-          summaryText = (po.summary as string) ?? (po.text as string)
-            ?? ((po.summaries as { summary: string }[])?.[0]?.summary) ?? '';
+      // ── Outreach response analysis operator ───────────────────────────────
+      if (isOutreachOp && !outreachAnalysis) {
+        console.log(`[CI] outreach resultField keys: ${Object.keys(resultField ?? {}).join(', ')}`);
+        let parsed: { interactions?: { question: string; answer: string }[] } | null = null;
+        if (Array.isArray((resultField as Record<string, unknown> | undefined)?.interactions)) {
+          parsed = resultField as unknown as typeof parsed;
+        } else {
+          const p = resultField?.payload
+            ?? (resultField?.['com.twilio.cai.intelligence.JSONResult'] as Record<string, unknown> | undefined)?.payload;
+          console.log(`[CI] outreach payload type=${typeof p} value=${JSON.stringify(p)?.slice(0, 200)}`);
+          if (typeof p === 'string') {
+            try { parsed = JSON.parse(p); } catch (e) { console.warn(`[CI] outreach JSON parse failed: ${e}`); }
+          } else if (typeof p === 'object' && p !== null) {
+            parsed = p as unknown as typeof parsed;
+          }
+        }
+        const interactions = parsed?.interactions ?? [];
+        console.log(`[CI] outreach interactions count=${interactions.length}`);
+        if (interactions.length > 0) {
+          outreachAnalysis = 'Outreach Analysis\n' + interactions
+            .map(i => `Q: ${i.question}\nA: ${i.answer}`)
+            .join('\n\n');
         }
       }
-
-      // Final fallback — try common top-level fields
-      if (!summaryText) {
-        summaryText = (resultField?.result as string) ?? (resultField?.summary as string) ?? (resultField?.text as string) ?? '';
-        if (summaryText) console.log(`[CI] fallback extraction found summaryText`);
-      }
-
-      console.log(`[CI] summaryText (${summaryText.length} chars): "${summaryText.slice(0, 120)}"`);
-      if (!summaryText) { console.warn('[CI] empty summaryText — skipping'); continue; }
-
-      const execDetails = result.executionDetails as Record<string, unknown> | undefined;
-      const participants = (execDetails?.participants as { id: string; profileId?: string; type: string }[]) ?? [];
-      const customerParticipant = participants.find(p => p.type === 'CUSTOMER');
-      const profileIdFromPayload = customerParticipant?.profileId ?? null;
-
-      const ts = formatTimestampPST(result.dateCreated as string | undefined);
-      const channels = (execDetails?.channels as string[] | undefined) ?? [];
-      const prefixed = `[${channels[0] ?? 'voice'}, ${ts}] ${summaryText.trim()}`;
-
-      console.log(`[CI] profileIdFromPayload=${profileIdFromPayload ?? '(none)'} customerParticipant=${JSON.stringify(customerParticipant)}`);
-
-      // Ask Python TAC server which member phone this conversation belongs to
-      let memberPhone: string | null = null;
-      try {
-        const tacRes = await fetch(`http://localhost:${TAC_PORT}/get-outbound-phone/${encodeURIComponent(convId)}`);
-        const tacData = await tacRes.json() as { phone?: string };
-        memberPhone = tacData.phone || null;
-      } catch (e) {
-        console.warn('[CI] TAC server phone lookup failed:', e);
-      }
-      console.log(`[CI] looking up convId=${convId} → memberPhone=${memberPhone ?? '(not found)'}`);
-
-      if (memberPhone) {
-        console.log(`[CI] outbound — updating profile for memberPhone=${memberPhone}`);
-        const profileId = await lookupProfileId(memberPhone);
-        console.log(`[CI] resolved profileId=${profileId ?? '(not found)'} for ${memberPhone}`);
-        if (profileId) await updateProfileTraits(profileId, 'outreach', { lastCallSummary: prefixed });
-      } else if (profileIdFromPayload) {
-        console.log(`[CI] inbound — updating profile ${profileIdFromPayload}`);
-        await updateProfileTraits(profileIdFromPayload, 'outreach', { lastCallSummary: prefixed });
-      } else {
-        console.warn('[CI] no profile identified — summary not written');
-      }
-      break;
     }
+
+    if (!profileId) {
+      console.warn('[CI] no profile identified — nothing written');
+      return reply.send({ success: true });
+    }
+
+    const execDetails = (operatorResults[0] as Record<string, unknown> | undefined)?.executionDetails as Record<string, unknown> | undefined;
+    const channels = (execDetails?.channels as string[] | undefined) ?? [];
+    const ts = formatTimestampPST(
+      ((operatorResults[0] as Record<string, unknown> | undefined)?.dateCreated as string | undefined)
+    );
+    const channel = channels[0] ?? 'voice';
+
+    if (!summaryText && !outreachAnalysis) {
+      console.warn('[CI] no content extracted from any operator — skipping write');
+      return reply.send({ success: true });
+    }
+
+    // Buffer trait updates — both CI operators fire separate webhooks within milliseconds.
+    // scheduleCIFlush waits 3s then does one read-then-write with all buffered updates.
+    const pending = ciPendingTraits.get(profileId) ?? {};
+
+    if (summaryText) {
+      pending.lastCallSummary = `[${channel}, ${ts}] ${summaryText.trim()}`;
+      console.log(`[CI] buffered lastCallSummary (${(pending.lastCallSummary as string).length} chars)`);
+    }
+
+    if (outreachAnalysis) {
+      pending.outreachResponses = `[${channel}, ${ts}]\n${outreachAnalysis}`;
+      console.log(`[CI] buffered outreachResponses (${(pending.outreachResponses as string).length} chars)`);
+    }
+
+    ciPendingTraits.set(profileId, pending);
+    scheduleCIFlush(profileId);
+    console.log(`[CI] scheduled flush for profileId=${profileId} buffered=${Object.keys(pending).join(', ')}`);
 
     reply.send({ success: true });
   });

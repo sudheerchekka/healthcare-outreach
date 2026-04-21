@@ -39,7 +39,8 @@ Keep each response brief and easy to follow on a phone call. \
 The member has already been greeted — do not re-introduce yourself or ask if they have time to talk. \
 When call context is provided, use it to personalize your responses and guide follow-up questions naturally. \
 Avoid asking for information you already have from the member's profile or prior call summaries. \
-Always steer the conversation toward a clear next step or action."""
+Ask no more than 3 questions total across the entire call. Once you have collected answers to those questions, \
+thank the member warmly by name, let them know the care team will follow up if needed, and wrap up the conversation."""
 
 
 def turns_to_messages(turns: list) -> Messages:
@@ -215,8 +216,10 @@ async def handle_voice_websocket(websocket, request_context=None):
             log.info("[ws] stream cancelled (interrupt)")
             raise
         finally:
-            # Always send the sentinel so the TAC server stops waiting
-            await websocket.send_text(json.dumps({"type": "text", "token": "", "last": True}))
+            try:
+                await websocket.send_text(json.dumps({"type": "text", "token": "", "last": True}))
+            except Exception as e:
+                log.warning(f"[ws] could not send sentinel (connection already closed): {e}")
             log.info(f"[ws] stream done reply_len={len(full_reply)}")
 
     await websocket.accept()

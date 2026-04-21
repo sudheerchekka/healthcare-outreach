@@ -12,6 +12,7 @@ export interface OutreachTraits {
   nextFollowUpReason?: string;
   status?: 'pending' | 'scheduled' | 'completed';
   lastCallSummary?: string;
+  outreachResponses?: string;
 }
 
 export interface MemberProfile {
@@ -44,5 +45,6 @@ export interface MemberRow {
   next_follow_up: string;
   next_follow_up_reason: string;
   status: string;
+  outreach_responses: string;
   last_call_summary: string;
 }

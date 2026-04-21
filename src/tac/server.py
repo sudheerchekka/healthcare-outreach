@@ -259,11 +259,17 @@ class OwlVoiceChannel(VoiceChannel):
             pending_outbound_context[conv_id] = pending_outbound_context.pop(outbound_conv_id)
             logger.info(f"[setup] mapped outboundConvId={outbound_conv_id} → maestroConvId={conv_id}")
 
+        # Populate outbound_conversation_map immediately at call setup so the CI
+        # webhook can find the member phone even if the caller hangs up before speaking.
+        ctx = pending_outbound_context.get(conv_id)
+        if ctx and ctx.get("phone"):
+            outbound_conversation_map[conv_id] = ctx["phone"]
+            logger.info(f"[setup] outbound_conversation_map[{conv_id}]={ctx['phone']}")
+
         # Pre-warm AgentCore WebSocket + memory in background so turn 1 is instant.
         # _handle_setup is sync, so schedule the async work onto the event loop.
         session_id = message.custom_parameters.profile_id or conv_id
         phone = ""
-        ctx = pending_outbound_context.get(conv_id)
         if ctx:
             phone = ctx.get("phone", "")
         elif message.from_number:
@@ -519,10 +525,10 @@ async def set_outbound_context(request: Request) -> dict:
 @app.get("/get-outbound-phone/{conv_id}")
 async def get_outbound_phone(conv_id: str) -> dict:
     """IPC endpoint — Node.js CI webhook calls this to resolve member phone."""
-    phone = outbound_conversation_map.get(conv_id)
-    if phone:
-        outbound_conversation_map.pop(conv_id, None)
-    return {"phone": phone or ""}
+    # Do not pop — multiple CI operator webhooks fire per call and all need the phone.
+    # The entry stays until the next call for this member overwrites it.
+    phone = outbound_conversation_map.get(conv_id, "")
+    return {"phone": phone}
 
 
 @app.post("/ci-webhook")
