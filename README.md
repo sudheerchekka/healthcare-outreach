@@ -98,12 +98,15 @@ healthcare-outreach-node/
 │   │           ├── pyproject.toml       # Python dependencies (managed by uv)
 │   │           └── .bedrock_agentcore.yaml
 │   │
-│   ├── prompts.ts                       # Greeting builder
+│   ├── prompts.ts                       # Greeting + system prompt builders
 │   └── types.ts                         # Shared TypeScript interfaces
 │
 ├── scripts/
 │   ├── add-outbound-capture-rule.ts     # Configure Conversation Orchestrator for outbound calls
 │   └── grant-agentcore-memory-permissions.ts  # Grant STM access to AgentCore execution role
+│
+├── blog/
+│   └── agentic-care-coordination.md    # Twilio blog post draft
 │
 ├── docs/
 │   └── detailed-flow.md                 # Step-by-step TAC + AgentCore call flow
@@ -120,7 +123,7 @@ healthcare-outreach-node/
 ## Prerequisites
 
 - Node.js 20+
-- Python 3.10+ with [uv](https://github.com/astral-sh/uv) (for the TAC server venv) and `pip` (for the AgentCore agent)
+- Python 3.10+ and `pip` (for the TAC server); [uv](https://github.com/astral-sh/uv) is used by the AgentCore agent (`agentcore dev` manages it automatically)
 - An active Twilio account with:
   - TAC Memory Store
   - Conversation Orchestrator configuration (see [Orchestrator Setup](#conversation-orchestrator-setup) below)

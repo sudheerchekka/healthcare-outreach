@@ -19,9 +19,9 @@ import {
 } from './memory';
 
 // ── Env ────────────────────────────────────────────────────────────────────
-const ACCOUNT_SID      = process.env.TWILIO_ACCOUNT_SID ?? '';
-const AUTH_TOKEN       = process.env.TWILIO_AUTH_TOKEN ?? '';
-const PHONE_NUMBER     = process.env.TWILIO_PHONE_NUMBER ?? '';
+const ACCOUNT_SID      = process.env.TWILIO_TAC_ACCOUNT_SID ?? '';
+const AUTH_TOKEN       = process.env.TWILIO_TAC_AUTH_TOKEN ?? '';
+const PHONE_NUMBER     = process.env.TWILIO_TAC_PHONE_NUMBER ?? '';
 const VOICE_DOMAIN     = (process.env.VOICE_PUBLIC_DOMAIN ?? 'NOT_SET').replace(/^https?:\/\//, '');
 const OUTBOUND_CALL_TO = process.env.OUTBOUND_CALL_TO ?? '';
 const CI_SUMMARY_OPERATOR_SID = process.env.TWILIO_TAC_CI_SUMMARY_OPERATOR_SID ?? '';
