@@ -246,16 +246,49 @@ npm start            # runs node dist/index.js
 
 ### Docker
 
-```bash
-npm run build
-docker build -t healthcare-outreach-node .
+The Docker container runs both servers — Python TAC server (port 8000) and Node.js app server (port 8001) — from a single image.
 
+#### 1. Vendor the TAC Python SDK (one-time per machine)
+
+The TAC SDK is not on PyPI. Copy it into `vendor/` so Docker can find it:
+
+```bash
+cp -r ~/.claude/cache/twilio-agent-connect-python vendor/twilio-agent-connect
+```
+
+> `vendor/` is gitignored. Repeat this after cloning on a new machine.
+
+#### 2. Build the image
+
+```bash
+docker build -t healthcare-outreach-node .
+```
+
+#### 3. Run
+
+**With AWS profile** (local dev — mounts your `~/.aws` credentials read-only):
+
+```bash
+docker run -p 8000:8000 -p 8001:8001 \
+  --env-file .env \
+  -v ~/.aws:/root/.aws:ro \
+  healthcare-outreach-node
+```
+
+**On EC2 with an IAM role** (no credential files needed):
+
+```bash
 docker run -p 8000:8000 -p 8001:8001 \
   --env-file .env \
   healthcare-outreach-node
 ```
 
-On EC2 with an IAM role attached, omit `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_PROFILE` — credentials are picked up automatically from the instance metadata.
+Open the dashboard at `http://localhost:8001/members.html`.
+
+| Port | Server |
+|---|---|
+| 8000 | Python TAC server (Twilio webhooks, ConversationRelay) |
+| 8001 | Node.js app server (dashboard, member APIs) |
 
 ---
 

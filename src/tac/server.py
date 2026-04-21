@@ -322,13 +322,10 @@ async def handle_message_ready(
         else:
             enriched = mem_ctx
         memory_context_cache[conv_id] = enriched
-        logger.info(f"[healthcare] enrichedContext (turn 1):\n{enriched or '(empty)'}")
     else:
         enriched = ""
 
     system_prompt = system_prompt_cache.get(conv_id, "") if is_turn1 else ""
-    if is_turn1:
-        logger.info(f"[healthcare] systemPrompt (turn 1):\n{system_prompt}")
 
     logger.info(f"[healthcare] invoking agent session_id={session_id} conv_id={conv_id} turn1={is_turn1} message=\"{user_message[:60]}\"")
 

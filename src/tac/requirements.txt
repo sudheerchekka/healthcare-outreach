@@ -1,4 +1,4 @@
-twilio-agent-connect @ file:///Users/schekka/.claude/cache/twilio-agent-connect-python
+twilio-agent-connect @ file:///app/vendor/twilio-agent-connect
 bedrock-agentcore>=1.0.3
 strands-agents
 fastapi
