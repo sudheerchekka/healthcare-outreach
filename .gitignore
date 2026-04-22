@@ -21,3 +21,4 @@ npm-debug.log*
 
 # Vendored SDK — copy from ~/.claude/cache/twilio-agent-connect-python before docker build
 vendor/
+elevenlabs/__pycache__/
