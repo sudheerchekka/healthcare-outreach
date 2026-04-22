@@ -27,6 +27,8 @@ const OUTBOUND_CALL_TO = process.env.OUTBOUND_CALL_TO ?? '';
 const CI_SUMMARY_OPERATOR_SID  = process.env.TWILIO_TAC_CI_SUMMARY_OPERATOR_SID ?? '';
 const CI_OUTREACH_OPERATOR_SID = process.env.TWILIO_TAC_CI_OUTREACH_OPERATOR_SID ?? '';
 const TAC_PORT         = parseInt(process.env.TAC_PORT ?? '8000', 10);
+const AGENT_BACKEND    = process.env.AGENT_BACKEND ?? 'agentcore';
+const EL_PORT          = parseInt(process.env.ELEVENLABS_PORT ?? '8002', 10);
 
 const twilioClient = new Twilio(ACCOUNT_SID, AUTH_TOKEN);
 
@@ -140,18 +142,22 @@ export async function startHealthcareAppServer(): Promise<void> {
     const convId = `outbound-${memberPhone}-${Date.now()}`;
     const ctx: OutboundContext & { conv_id: string } = { conv_id: convId, name, goal, goalDesc, phone: memberPhone, greeting };
 
+    const backendPort = AGENT_BACKEND === 'elevenlabs' ? EL_PORT : TAC_PORT;
+    const backendName = AGENT_BACKEND === 'elevenlabs' ? 'ElevenLabs' : 'TAC';
     try {
-      await fetch(`http://localhost:${TAC_PORT}/set-outbound-context`, {
+      await fetch(`http://localhost:${backendPort}/set-outbound-context`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(ctx),
       });
     } catch (e) {
-      console.error('[outbound-call] failed to set outbound context on TAC server:', e);
-      return reply.status(500).send({ success: false, error: 'TAC server unreachable' });
+      console.error(`[outbound-call] failed to set outbound context on ${backendName} server:`, e);
+      return reply.status(500).send({ success: false, error: `${backendName} server unreachable` });
     }
 
     const params = new URLSearchParams({ conv_id: convId });
+    // Both backends expose /twiml-outbound at their respective ports but share the same
+    // public domain (ngrok). The backend-specific path must be routed via VOICE_PUBLIC_DOMAIN.
     const twimlUrl = `https://${VOICE_DOMAIN}/twiml-outbound?${params}`;
 
     try {
