@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Member Detail — Owl Health</title>
+  <script src="https://sdk.twilio.com/js/voice/2.10.2/twilio.min.js"></script>
   <style>
     :root {
       --primary:       #F22F46;
@@ -169,6 +170,11 @@
     .live-card-label { font-size: 13px; font-weight: 700; color: var(--dark); text-transform: uppercase; letter-spacing: .5px; }
     .live-card-ts    { font-size: 11px; color: var(--text-muted); }
     .live-card-body  { font-size: 13px; color: var(--text); line-height: 1.6; white-space: pre-wrap; flex: 1; }
+    .sentiment-label { font-size: 28px; font-weight: 700; text-transform: capitalize; }
+    .sentiment-positive { color: #16a34a; }
+    .sentiment-negative { color: #dc2626; }
+    .sentiment-neutral  { color: var(--text); }
+    .sentiment-mixed    { color: #ea580c; }
     .live-card-empty { font-size: 13px; color: var(--text-muted); font-style: italic; flex: 1; display: flex; align-items: center; }
     .live-dot {
       width: 8px; height: 8px; border-radius: 50%; background: #d1fae5;
@@ -177,6 +183,20 @@
     .live-dot.active { background: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,.2); animation: pulse 1.5s infinite; }
     @keyframes pulse { 0%,100% { box-shadow: 0 0 0 3px rgba(16,185,129,.2); } 50% { box-shadow: 0 0 0 6px rgba(16,185,129,.05); } }
     .live-status { display: flex; align-items: center; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 16px; border-radius: var(--radius);
+      font-size: 13px; font-weight: 600; border: none; cursor: pointer;
+      transition: all .18s; white-space: nowrap;
+    }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-voice { background: var(--primary-light); color: var(--primary-dark); }
+    .btn-voice:hover:not(:disabled) { background: var(--primary); color: var(--white); }
+    .btn-browser-call { background: #f0fdf4; color: #166534; }
+    .btn-browser-call:hover:not(:disabled) { background: #16a34a; color: var(--white); }
+    .btn-browser-call.active { background: #dc2626; color: var(--white); }
+    .btn-browser-call.active:hover:not(:disabled) { background: #991b1b; color: var(--white); }
 
     footer {
       text-align: center; padding: 28px 32px;
@@ -204,13 +224,23 @@
 
   <div id="profileCard" class="profile-card" style="display:none">
     <div class="avatar-lg" id="avatarLg"></div>
-    <div class="profile-info">
+    <div class="profile-info" style="flex:1">
       <h1 id="profileName"></h1>
       <div class="profile-traits">
         <div class="trait"><strong>Member ID</strong><br><span id="profileMemberId">—</span></div>
         <div class="trait"><strong>Phone</strong><br><span id="profilePhone">—</span></div>
         <div class="trait"><strong>Profile ID</strong><br><span id="profileId" style="font-size:11px;font-family:monospace"></span></div>
       </div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-shrink:0">
+      <button class="btn btn-voice" id="btnAiCall" onclick="triggerAiCall()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.44 2 2 0 0 1 3.6 1.27h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.09 6.09l.96-.96a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        AI Agent Call
+      </button>
+      <button class="btn btn-browser-call" id="btnBrowserCall" onclick="toggleBrowserCall()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.44 2 2 0 0 1 3.6 1.27h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.09 6.09l.96-.96a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        Call Member
+      </button>
     </div>
   </div>
   <div id="profileLoading"><div class="spinner"></div></div>
@@ -268,6 +298,7 @@
 <script>
   const params    = new URLSearchParams(window.location.search);
   const profileId = params.get('profile_id') || '';
+  let memberData  = null;  // populated by loadProfile()
 
   /* ── Toast ─────────────────────────────────────────────────── */
   const toastEl = document.getElementById('toast');
@@ -296,6 +327,7 @@
       const data = await res.json();
       const m    = (data.members || []).find(x => x.profile_id === profileId);
       if (!m) return;
+      memberData = m;
       const initials = m.initials || '??';
       document.getElementById('avatarLg').textContent      = initials;
       document.getElementById('profileName').textContent   = m.name;
@@ -425,6 +457,84 @@
     document.getElementById(`tab-${name}`).classList.add('active');
   }
 
+  /* ── AI Agent Call ──────────────────────────────────────────── */
+  async function triggerAiCall() {
+    if (!memberData) return;
+    const btn = document.getElementById('btnAiCall');
+    const orig = btn.innerHTML;
+    btn.disabled = true; btn.textContent = '⏳';
+    try {
+      const res  = await fetch('http://localhost:8001/api/outbound-call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: memberData.name, phone: memberData.phone,
+          goal: memberData.next_follow_up, goalDesc: memberData.next_follow_up_reason,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) showToast(`Calling ${memberData.name} via AI agent…`, 'success');
+      else showToast(`Call failed: ${data.error}`, 'error');
+    } catch (e) { showToast('Could not reach app server.', 'error'); }
+    finally { btn.disabled = false; btn.innerHTML = orig; }
+  }
+
+  /* ── Browser Call (Twilio Client SDK) ───────────────────────── */
+  let twilioDevice = null;
+  let activeCall   = null;
+
+  async function initTwilioDevice() {
+    if (twilioDevice) return twilioDevice;
+    const res  = await fetch('http://localhost:8001/api/browser-call-token');
+    const data = await res.json();
+    if (!data.token) throw new Error('No token returned');
+    twilioDevice = new Twilio.Device(data.token, { logLevel: 'warn' });
+    await twilioDevice.register();
+    twilioDevice.on('error', e => { showToast(`Device error: ${e.message}`, 'error'); });
+    return twilioDevice;
+  }
+
+  async function toggleBrowserCall() {
+    const btn = document.getElementById('btnBrowserCall');
+    if (activeCall) {
+      activeCall.disconnect();
+      activeCall = null;
+      btn.classList.remove('active');
+      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.44 2 2 0 0 1 3.6 1.27h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.09 6.09l.96-.96a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg> Call Member`;
+      showToast('Call ended.', 'info');
+      return;
+    }
+    if (!memberData?.phone) { showToast('No phone number for this member.', 'error'); return; }
+    btn.disabled = true; btn.textContent = '⏳ Connecting…';
+    try {
+      const device = await initTwilioDevice();
+      activeCall = await device.connect({ params: { To: memberData.phone } });
+      activeCall.on('accept',     () => {
+        btn.disabled = false;
+        btn.classList.add('active');
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Hang Up`;
+        showToast(`Connected to ${memberData.name}`, 'success');
+      });
+      activeCall.on('disconnect', () => {
+        activeCall = null;
+        btn.disabled = false;
+        btn.classList.remove('active');
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.44 2 2 0 0 1 3.6 1.27h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.09 6.09l.96-.96a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg> Call Member`;
+        showToast('Call ended.', 'info');
+      });
+      activeCall.on('error', e => {
+        showToast(`Call error: ${e.message}`, 'error');
+        btn.disabled = false; btn.classList.remove('active');
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.44 2 2 0 0 1 3.6 1.27h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.09 6.09l.96-.96a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg> Call Member`;
+        activeCall = null;
+      });
+    } catch (e) {
+      showToast(`Failed to connect: ${e.message}`, 'error');
+      btn.disabled = false;
+      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.44 2 2 0 0 1 3.6 1.27h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.96a16 16 0 0 0 6.09 6.09l.96-.96a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg> Call Member`;
+    }
+  }
+
   /* ── Live operator results via SSE ──────────────────────────── */
   let sseSource = null;
 
@@ -460,15 +570,21 @@
     }
     grid.innerHTML = operators.map(op => {
       const r = results[op.sid];
+      const isSentiment = op.label.toLowerCase() === 'sentiment';
+      const sentimentClass = isSentiment && r
+        ? `sentiment-${r.result.toLowerCase().trim()}` : '';
+      const bodyHtml = r
+        ? (isSentiment
+            ? `<div class="sentiment-label ${sentimentClass}">${escHtml(r.result)}</div>`
+            : `<div class="live-card-body">${escHtml(r.result)}</div>`)
+        : `<div class="live-card-empty">Waiting for result…</div>`;
       return `
         <div class="live-card">
           <div class="live-card-header">
             <div class="live-card-label">${escHtml(op.label)}</div>
             ${r ? `<div class="live-card-ts">${escHtml(r.ts)}</div>` : ''}
           </div>
-          ${r
-            ? `<div class="live-card-body">${escHtml(r.result)}</div>`
-            : `<div class="live-card-empty">Waiting for result…</div>`}
+          ${bodyHtml}
         </div>`;
     }).join('');
   }

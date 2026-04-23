@@ -3,7 +3,7 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import fastifyFormBody from '@fastify/formbody';
 import axios from 'axios';
-import { Twilio } from 'twilio';
+import { Twilio, jwt as twilioJwt } from 'twilio';
 import * as path from 'path';
 
 import { buildGreeting } from '../../../prompts';
@@ -274,6 +274,28 @@ export async function startHealthcareAppServer(): Promise<void> {
     });
   });
 
+  // ── Browser call token (Twilio Client SDK) ───────────────────────────────
+  app.get('/api/browser-call-token', async (_req, reply) => {
+    try {
+      const { AccessToken } = twilioJwt;
+      const { VoiceGrant } = AccessToken;
+      const token = new AccessToken(ACCOUNT_SID, process.env.TWILIO_API_KEY ?? '', process.env.TWILIO_API_TOKEN ?? '', { identity: 'care-team-agent', ttl: 3600 });
+      token.addGrant(new VoiceGrant({ outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID ?? '', incomingAllow: false }));
+      reply.send({ token: token.toJwt() });
+    } catch (e) {
+      reply.status(500).send({ error: String(e) });
+    }
+  });
+
+  // ── TwiML for browser-initiated outbound call ────────────────────────────
+  app.post('/api/browser-call-twiml', async (req, reply) => {
+    const { To } = req.body as Record<string, string>;
+    const dialTo = OUTBOUND_CALL_TO || To || '';
+    if (!dialTo) return reply.type('application/xml').send('<Response><Say>No destination number.</Say></Response>');
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="${PHONE_NUMBER}"><Number>${dialTo}</Number></Dial></Response>`;
+    reply.type('application/xml').send(twiml);
+  });
+
   // ── Send SMS ─────────────────────────────────────────────────────────────
   app.post('/api/send-sms', async (req, reply) => {
     const { name = 'Member', phone = '', goal = '', goalDesc = '' } = req.body as Record<string, string>;
@@ -369,8 +391,9 @@ export async function startHealthcareAppServer(): Promise<void> {
       const liveOp = CI_OPERATORS.find(o => o.sid === operatorId);
       console.log(`[CI] live check operatorId=${operatorId} liveOp=${liveOp?.label ?? 'none'} profileId=${profileId ?? 'null'} hasResult=${!!resultField}`);
       if (liveOp && profileId && resultField) {
-        // Extract text result regardless of operator type
+        // Extract text result — handles TEXT, CLASSIFICATION, and JSON operator types
         let liveText = (resultField.result as string) ?? '';
+        if (!liveText) liveText = (resultField.label as string) ?? '';  // CLASSIFICATION
         if (!liveText) {
           const p = resultField.payload
             ?? (resultField['com.twilio.cai.intelligence.JSONResult'] as Record<string, unknown> | undefined)?.payload;
