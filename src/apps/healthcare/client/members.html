@@ -185,7 +185,8 @@
       display: flex; align-items: center; justify-content: center;
       flex-shrink: 0;
     }
-    .member-name { font-weight: 600; color: var(--text); }
+    .member-name { font-weight: 600; color: var(--primary-dark); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+    .member-name:hover { color: var(--primary); }
     .member-id   { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
 
     /* ── Phone cell ─────────────────────────────────────────────── */
@@ -457,7 +458,7 @@
           <div class="member-cell">
             <div class="avatar">${m.initials || '??'}</div>
             <div>
-              <div class="member-name">${m.name}</div>
+              <div class="member-name" onclick="openDetail('${m.profile_id}')">${m.name}</div>
               <div class="member-id">${m.member_id}</div>
             </div>
           </div>
@@ -629,6 +630,11 @@
       btn.disabled = false;
       btn.innerHTML = originalHTML;
     }
+  }
+
+  /* ── Open member detail page ────────────────────────────────── */
+  function openDetail(profileId) {
+    window.location.href = `/member-detail.html?profile_id=${encodeURIComponent(profileId)}`;
   }
 
   /* ── Init ────────────────────────────────────────────────────── */

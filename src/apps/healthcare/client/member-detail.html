@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Member Detail — Owl Health</title>
+  <style>
+    :root {
+      --primary:       #F22F46;
+      --primary-dark:  #c0192b;
+      --primary-light: #fff0f2;
+      --dark:          #0D122B;
+      --dark-light:    #e8e9ef;
+      --text:          #323438;
+      --text-muted:    #6b7280;
+      --border:        #e2e2e8;
+      --white:         #ffffff;
+      --bg:            #f8f8fc;
+      --radius:        10px;
+      --shadow:        0 2px 12px rgba(13,18,43,.08);
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh;
+    }
+
+    header {
+      background: var(--white); border-bottom: 3px solid var(--primary);
+      box-shadow: var(--shadow); position: sticky; top: 0; z-index: 100;
+    }
+    .header-inner {
+      max-width: 1100px; margin: 0 auto; padding: 0 32px; height: 68px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .logo img { height: 38px; display: block; }
+    .header-badge {
+      background: var(--primary-light); border: 1px solid var(--border);
+      color: var(--dark); font-size: 12px; font-weight: 600;
+      padding: 4px 12px; border-radius: 20px; letter-spacing: .4px;
+      text-transform: uppercase;
+    }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 32px; }
+
+    .back-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: var(--text-muted); font-size: 14px; text-decoration: none;
+      margin-bottom: 24px;
+    }
+    .back-link:hover { color: var(--primary); }
+
+    /* ── Profile card ── */
+    .profile-card {
+      background: var(--white); border-radius: var(--radius);
+      box-shadow: var(--shadow); border: 1px solid var(--border);
+      padding: 28px 32px; margin-bottom: 32px;
+      display: flex; align-items: center; gap: 24px;
+    }
+    .avatar-lg {
+      width: 64px; height: 64px; border-radius: 50%;
+      background: var(--dark-light); color: var(--dark);
+      font-size: 22px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .profile-info h1 { font-size: 22px; font-weight: 700; color: var(--dark); }
+    .profile-traits {
+      display: flex; gap: 24px; margin-top: 10px; flex-wrap: wrap;
+    }
+    .trait { font-size: 13px; color: var(--text-muted); }
+    .trait strong { color: var(--text); font-weight: 600; }
+
+    /* ── Section ── */
+    .section { margin-bottom: 36px; }
+    .section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .section-title {
+      font-size: 16px; font-weight: 700; color: var(--dark);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .count-badge {
+      background: var(--primary); color: var(--white);
+      font-size: 11px; font-weight: 700;
+      padding: 2px 8px; border-radius: 12px;
+    }
+
+    /* ── Table ── */
+    .card {
+      background: var(--white); border-radius: var(--radius);
+      box-shadow: var(--shadow); border: 1px solid var(--border); overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th {
+      background: var(--primary-light); color: var(--dark);
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .6px; padding: 12px 16px; text-align: left;
+      border-bottom: 2px solid var(--border); white-space: nowrap;
+    }
+    tbody tr { border-bottom: 1px solid #f0f0f5; transition: background .15s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #faf8fc; }
+    td { padding: 14px 16px; vertical-align: top; }
+
+    .content-cell { line-height: 1.6; color: var(--text); white-space: pre-line; }
+    .meta-cell { color: var(--text-muted); font-size: 12px; white-space: nowrap; min-width: 160px; }
+    .id-cell { color: var(--text-muted); font-size: 11px; font-family: monospace; min-width: 200px; word-break: break-all; }
+
+    .btn-delete {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 4px 10px; border-radius: 6px;
+      font-size: 12px; font-weight: 600;
+      background: #fef2f2; color: #991b1b;
+      border: none; cursor: pointer; transition: all .18s; white-space: nowrap;
+    }
+    .btn-delete:hover { background: #991b1b; color: var(--white); }
+    .btn-delete:disabled { opacity: .4; cursor: not-allowed; }
+
+    .empty-row td { text-align: center; color: var(--text-muted); font-style: italic; padding: 32px; }
+
+    .spinner {
+      width: 28px; height: 28px; margin: 32px auto;
+      border: 3px solid var(--border); border-top-color: var(--primary);
+      border-radius: 50%; animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #toast {
+      position: fixed; bottom: 28px; left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: var(--dark); color: var(--white);
+      padding: 12px 24px; border-radius: var(--radius);
+      font-size: 14px; font-weight: 500;
+      box-shadow: 0 4px 20px rgba(0,0,0,.25);
+      opacity: 0; transition: opacity .25s, transform .25s;
+      pointer-events: none; z-index: 999;
+    }
+    #toast.show    { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #toast.success { background: var(--primary-dark); }
+    #toast.error   { background: #c0392b; }
+
+    /* ── Tabs ── */
+    .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 28px; }
+    .tab {
+      padding: 10px 22px; font-size: 14px; font-weight: 600;
+      color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent;
+      margin-bottom: -2px; transition: color .15s, border-color .15s;
+    }
+    .tab:hover { color: var(--primary); }
+    .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* ── Live results grid ── */
+    .live-grid {
+      display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;
+    }
+    @media (max-width: 700px) { .live-grid { grid-template-columns: 1fr; } }
+    .live-card {
+      background: var(--white); border-radius: var(--radius);
+      box-shadow: var(--shadow); border: 1px solid var(--border);
+      padding: 20px 24px; min-height: 160px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .live-card-header {
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .live-card-label { font-size: 13px; font-weight: 700; color: var(--dark); text-transform: uppercase; letter-spacing: .5px; }
+    .live-card-ts    { font-size: 11px; color: var(--text-muted); }
+    .live-card-body  { font-size: 13px; color: var(--text); line-height: 1.6; white-space: pre-wrap; flex: 1; }
+    .live-card-empty { font-size: 13px; color: var(--text-muted); font-style: italic; flex: 1; display: flex; align-items: center; }
+    .live-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #d1fae5;
+      display: inline-block; margin-right: 6px;
+    }
+    .live-dot.active { background: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,.2); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { box-shadow: 0 0 0 3px rgba(16,185,129,.2); } 50% { box-shadow: 0 0 0 6px rgba(16,185,129,.05); } }
+    .live-status { display: flex; align-items: center; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+
+    footer {
+      text-align: center; padding: 28px 32px;
+      font-size: 12px; color: var(--text-muted);
+      border-top: 1px solid var(--border); margin-top: 40px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <a class="logo" href="#">
+      <img src="owl-health-logo-3.svg" alt="Owl Health" />
+    </a>
+    <span class="header-badge">Care Team Portal</span>
+  </div>
+</header>
+
+<main>
+  <a class="back-link" href="/members.html">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+    Back to Members
+  </a>
+
+  <div id="profileCard" class="profile-card" style="display:none">
+    <div class="avatar-lg" id="avatarLg"></div>
+    <div class="profile-info">
+      <h1 id="profileName"></h1>
+      <div class="profile-traits">
+        <div class="trait"><strong>Member ID</strong><br><span id="profileMemberId">—</span></div>
+        <div class="trait"><strong>Phone</strong><br><span id="profilePhone">—</span></div>
+        <div class="trait"><strong>Profile ID</strong><br><span id="profileId" style="font-size:11px;font-family:monospace"></span></div>
+      </div>
+    </div>
+  </div>
+  <div id="profileLoading"><div class="spinner"></div></div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('memory', this)">Memory</div>
+    <div class="tab" onclick="switchTab('live', this)">Live Operator Results</div>
+  </div>
+
+  <!-- Tab: Memory (observations + summaries) -->
+  <div id="tab-memory" class="tab-panel active">
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">Observations <span class="count-badge" id="obsCount">—</span></div>
+      </div>
+      <div class="card">
+        <table>
+          <thead><tr><th style="width:50%">Content</th><th>Occurred At</th><th>Source</th><th></th></tr></thead>
+          <tbody id="obsBody"><tr><td colspan="4"><div class="spinner"></div></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="section">
+      <div class="section-header">
+        <div class="section-title">Conversation Summaries <span class="count-badge" id="sumCount">—</span></div>
+      </div>
+      <div class="card">
+        <table>
+          <thead><tr><th style="width:50%">Content</th><th>Created At</th><th>Source</th><th></th></tr></thead>
+          <tbody id="sumBody"><tr><td colspan="4"><div class="spinner"></div></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab: Live Operator Results -->
+  <div id="tab-live" class="tab-panel">
+    <div class="live-status">
+      <span class="live-dot" id="liveDot"></span>
+      <span id="liveStatusText">Connecting…</span>
+    </div>
+    <div class="live-grid" id="liveGrid">
+      <div class="live-card"><div class="live-card-empty">No operators configured — add CI_OPERATOR_*_SID to .env</div></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  &copy; 2025 Owl Health, Inc. &nbsp;·&nbsp; Care Team Portal &nbsp;·&nbsp; Powered by Twilio Agent Connect
+</footer>
+
+<div id="toast"></div>
+
+<script>
+  const params    = new URLSearchParams(window.location.search);
+  const profileId = params.get('profile_id') || '';
+
+  /* ── Toast ─────────────────────────────────────────────────── */
+  const toastEl = document.getElementById('toast');
+  let toastTimer;
+  function showToast(msg, type = 'info') {
+    clearTimeout(toastTimer);
+    toastEl.textContent = msg;
+    toastEl.className = `show ${type}`;
+    toastTimer = setTimeout(() => { toastEl.className = ''; }, 3500);
+  }
+
+  /* ── Format date ───────────────────────────────────────────── */
+  function fmtDate(str) {
+    if (!str) return '—';
+    return new Date(str).toLocaleString('en-US', {
+      month: 'short', day: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: true,
+      timeZone: 'America/Los_Angeles',
+    });
+  }
+
+  /* ── Load profile info from members API ─────────────────────── */
+  async function loadProfile() {
+    try {
+      const res  = await fetch('http://localhost:8001/api/members');
+      const data = await res.json();
+      const m    = (data.members || []).find(x => x.profile_id === profileId);
+      if (!m) return;
+      const initials = m.initials || '??';
+      document.getElementById('avatarLg').textContent      = initials;
+      document.getElementById('profileName').textContent   = m.name;
+      document.getElementById('profileMemberId').textContent = m.member_id || '—';
+      document.getElementById('profilePhone').textContent  = m.phone || '—';
+      document.getElementById('profileId').textContent     = profileId;
+      document.title = `${m.name} — Owl Health`;
+    } catch {}
+    document.getElementById('profileLoading').style.display = 'none';
+    document.getElementById('profileCard').style.display    = 'flex';
+  }
+
+  /* ── Load observations + summaries ──────────────────────────── */
+  async function loadDetail() {
+    try {
+      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}`);
+      const data = await res.json();
+      renderObs(data.observations || []);
+      renderSum(data.summaries   || []);
+    } catch (e) {
+      document.getElementById('obsBody').innerHTML = `<tr class="empty-row"><td colspan="4">Failed to load: ${e.message}</td></tr>`;
+      document.getElementById('sumBody').innerHTML = `<tr class="empty-row"><td colspan="4">Failed to load: ${e.message}</td></tr>`;
+    }
+  }
+
+  /* ── Render observations ─────────────────────────────────────── */
+  function renderObs(items) {
+    document.getElementById('obsCount').textContent = items.length;
+    const tbody = document.getElementById('obsBody');
+    if (!items.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="4">No observations recorded</td></tr>';
+      return;
+    }
+    tbody.innerHTML = items.map(o => `
+      <tr id="obs-${o.id}">
+        <td class="content-cell">${escHtml(o.content)}</td>
+        <td class="meta-cell">${fmtDate(o.occurredAt || o.createdAt)}</td>
+        <td class="id-cell">${escHtml(o.source || '—')}</td>
+        <td>
+          <button class="btn-delete" onclick="deleteObs('${o.id}', this)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+            Delete
+          </button>
+        </td>
+      </tr>`).join('');
+  }
+
+  /* ── Render summaries ────────────────────────────────────────── */
+  function renderSum(items) {
+    document.getElementById('sumCount').textContent = items.length;
+    const tbody = document.getElementById('sumBody');
+    if (!items.length) {
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="4">No conversation summaries recorded</td></tr>';
+      return;
+    }
+    tbody.innerHTML = items.map(s => `
+      <tr id="sum-${s.id}">
+        <td class="content-cell">${escHtml(s.content)}</td>
+        <td class="meta-cell">${fmtDate(s.createdAt)}</td>
+        <td class="id-cell">${escHtml(s.source || '—')}</td>
+        <td>
+          <button class="btn-delete" onclick="deleteSum('${s.id}', this)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+            Delete
+          </button>
+        </td>
+      </tr>`).join('');
+  }
+
+  /* ── Delete handlers ─────────────────────────────────────────── */
+  async function deleteObs(obsId, btn) {
+    if (!confirm('Delete this observation?')) return;
+    btn.disabled = true;
+    try {
+      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}/observations/${encodeURIComponent(obsId)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        document.getElementById(`obs-${obsId}`)?.remove();
+        const cnt = document.getElementById('obsCount');
+        cnt.textContent = parseInt(cnt.textContent) - 1;
+        showToast('Observation deleted', 'success');
+      } else {
+        showToast(`Delete failed: ${data.error}`, 'error');
+        btn.disabled = false;
+      }
+    } catch (e) {
+      showToast('Could not reach app server.', 'error');
+      btn.disabled = false;
+    }
+  }
+
+  async function deleteSum(sumId, btn) {
+    if (!confirm('Delete this summary?')) return;
+    btn.disabled = true;
+    try {
+      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}/summaries/${encodeURIComponent(sumId)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        document.getElementById(`sum-${sumId}`)?.remove();
+        const cnt = document.getElementById('sumCount');
+        cnt.textContent = parseInt(cnt.textContent) - 1;
+        showToast('Summary deleted', 'success');
+      } else {
+        showToast(`Delete failed: ${data.error}`, 'error');
+        btn.disabled = false;
+      }
+    } catch (e) {
+      showToast('Could not reach app server.', 'error');
+      btn.disabled = false;
+    }
+  }
+
+  /* ── HTML escape ─────────────────────────────────────────────── */
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /* ── Tabs ────────────────────────────────────────────────────── */
+  function switchTab(name, el) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById(`tab-${name}`).classList.add('active');
+  }
+
+  /* ── Live operator results via SSE ──────────────────────────── */
+  let sseSource = null;
+
+  function startSSE() {
+    if (sseSource) sseSource.close();
+    const dot      = document.getElementById('liveDot');
+    const statusTx = document.getElementById('liveStatusText');
+    sseSource = new EventSource(`http://localhost:8001/api/ci-results/${encodeURIComponent(profileId)}/stream`);
+
+    sseSource.onopen = () => {
+      dot.classList.add('active');
+      statusTx.textContent = 'Listening for real-time operator results…';
+    };
+
+    sseSource.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        renderLiveGrid(data.operators || [], data.results || {});
+      } catch {}
+    };
+
+    sseSource.onerror = () => {
+      dot.classList.remove('active');
+      statusTx.textContent = 'Reconnecting…';
+    };
+  }
+
+  function renderLiveGrid(operators, results) {
+    const grid = document.getElementById('liveGrid');
+    if (!operators.length) {
+      grid.innerHTML = '<div class="live-card"><div class="live-card-empty">No operators configured — add CI_OPERATOR_*_SID to .env</div></div>';
+      return;
+    }
+    grid.innerHTML = operators.map(op => {
+      const r = results[op.sid];
+      return `
+        <div class="live-card">
+          <div class="live-card-header">
+            <div class="live-card-label">${escHtml(op.label)}</div>
+            ${r ? `<div class="live-card-ts">${escHtml(r.ts)}</div>` : ''}
+          </div>
+          ${r
+            ? `<div class="live-card-body">${escHtml(r.result)}</div>`
+            : `<div class="live-card-empty">Waiting for result…</div>`}
+        </div>`;
+    }).join('');
+  }
+
+  /* ── Init ────────────────────────────────────────────────────── */
+  if (!profileId) {
+    document.querySelector('main').innerHTML = '<p style="padding:40px;color:var(--text-muted)">No profile ID provided.</p>';
+  } else {
+    loadProfile();
+    loadDetail();
+    startSSE();
+  }
+</script>
+</body>
+</html>

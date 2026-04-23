@@ -27,9 +27,12 @@ const OUTBOUND_CALL_TO = process.env.OUTBOUND_CALL_TO ?? '';
 const CI_SUMMARY_OPERATOR_SID  = process.env.TWILIO_TAC_CI_SUMMARY_OPERATOR_SID ?? '';
 const CI_OUTREACH_OPERATOR_SID = process.env.TWILIO_TAC_CI_OUTREACH_OPERATOR_SID ?? '';
 const TAC_PORT         = parseInt(process.env.TAC_PORT ?? '8000', 10);
-const AGENT_BACKEND    = process.env.AGENT_BACKEND ?? 'agentcore';
-const EL_PORT          = parseInt(process.env.ELEVENLABS_PORT ?? '8002', 10);
 
+// ── Configurable live-results operator grid (up to 4 slots) ────────────────
+const CI_OPERATORS = [1, 2, 3, 4].map(n => ({
+  sid:   process.env[`CI_OPERATOR_${n}_SID`]   ?? '',
+  label: process.env[`CI_OPERATOR_${n}_LABEL`] ?? `Operator ${n}`,
+})).filter(o => o.sid);
 const twilioClient = new Twilio(ACCOUNT_SID, AUTH_TOKEN);
 
 // ── CI write debouncer ──────────────────────────────────────────────────────
@@ -38,6 +41,11 @@ const twilioClient = new Twilio(ACCOUNT_SID, AUTH_TOKEN);
 // overwrites the first update. We buffer trait updates per profileId for 3s then flush once.
 const ciPendingTraits = new Map<string, Record<string, unknown>>();
 const ciFlushTimers   = new Map<string, ReturnType<typeof setTimeout>>();
+
+// ── Live operator results store (profileId → operatorSid → result) ──────────
+const ciLiveResults = new Map<string, Record<string, { label: string; result: string; ts: string }>>();
+// ── SSE subscribers (profileId → set of response streams) ───────────────────
+const ciSseClients = new Map<string, Set<import('http').ServerResponse>>();
 
 function scheduleCIFlush(profileId: string): void {
   const existing = ciFlushTimers.get(profileId);
@@ -142,17 +150,15 @@ export async function startHealthcareAppServer(): Promise<void> {
     const convId = `outbound-${memberPhone}-${Date.now()}`;
     const ctx: OutboundContext & { conv_id: string } = { conv_id: convId, name, goal, goalDesc, phone: memberPhone, greeting };
 
-    const backendPort = AGENT_BACKEND === 'elevenlabs' ? EL_PORT : TAC_PORT;
-    const backendName = AGENT_BACKEND === 'elevenlabs' ? 'ElevenLabs' : 'TAC';
     try {
-      await fetch(`http://localhost:${backendPort}/set-outbound-context`, {
+      await fetch(`http://localhost:${TAC_PORT}/set-outbound-context`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(ctx),
       });
     } catch (e) {
-      console.error(`[outbound-call] failed to set outbound context on ${backendName} server:`, e);
-      return reply.status(500).send({ success: false, error: `${backendName} server unreachable` });
+      console.error('[outbound-call] failed to set outbound context on TAC server:', e);
+      return reply.status(500).send({ success: false, error: 'TAC server unreachable' });
     }
 
     const params = new URLSearchParams({ conv_id: convId });
@@ -189,6 +195,85 @@ export async function startHealthcareAppServer(): Promise<void> {
     }
   });
 
+  // ── Member detail: observations + summaries ─────────────────────────────
+  app.get('/api/member-detail/:profileId', async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    try {
+      const [obsRes, sumRes] = await Promise.all([
+        axios.get(`${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profileId}/Observations`, { auth: memoryAuth }),
+        axios.get(`${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profileId}/ConversationSummaries`, { auth: memoryAuth }),
+      ]);
+      reply.send({
+        observations: obsRes.data.observations ?? [],
+        summaries:    sumRes.data.summaries ?? [],
+      });
+    } catch (e) {
+      reply.status(500).send({ observations: [], summaries: [], error: String(e) });
+    }
+  });
+
+  // ── Delete observation ───────────────────────────────────────────────────
+  app.delete('/api/member-detail/:profileId/observations/:obsId', async (req, reply) => {
+    const { profileId, obsId } = req.params as { profileId: string; obsId: string };
+    try {
+      await axios.delete(
+        `${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profileId}/Observations/${obsId}`,
+        { auth: memoryAuth },
+      );
+      reply.send({ success: true });
+    } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
+  });
+
+  // ── Delete conversation summary ──────────────────────────────────────────
+  app.delete('/api/member-detail/:profileId/summaries/:sumId', async (req, reply) => {
+    const { profileId, sumId } = req.params as { profileId: string; sumId: string };
+    try {
+      await axios.delete(
+        `${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profileId}/ConversationSummaries/${sumId}`,
+        { auth: memoryAuth },
+      );
+      reply.send({ success: true });
+    } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
+  });
+
+  // ── Live CI operator results (snapshot) ─────────────────────────────────
+  app.get('/api/ci-results/:profileId', async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    reply.send({ operators: CI_OPERATORS, results: ciLiveResults.get(profileId) ?? {} });
+  });
+
+  // ── Live CI operator results (SSE stream) ────────────────────────────────
+  // Subscribers keyed by profileId; each call to this endpoint registers a sender.
+  app.get('/api/ci-results/:profileId/stream', async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    const raw = reply.raw;
+    raw.setHeader('Content-Type', 'text/event-stream');
+    raw.setHeader('Cache-Control', 'no-cache');
+    raw.setHeader('Connection', 'keep-alive');
+    raw.setHeader('Access-Control-Allow-Origin', '*');
+    raw.flushHeaders();
+
+    // Send current state immediately
+    const snapshot = { operators: CI_OPERATORS, results: ciLiveResults.get(profileId) ?? {} };
+    raw.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+
+    // Register subscriber
+    if (!ciSseClients.has(profileId)) ciSseClients.set(profileId, new Set());
+    ciSseClients.get(profileId)!.add(raw);
+
+    // Keepalive ping every 25s
+    const ping = setInterval(() => raw.write(': ping\n\n'), 25000);
+
+    req.raw.on('close', () => {
+      clearInterval(ping);
+      ciSseClients.get(profileId)?.delete(raw);
+    });
+  });
+
   // ── Send SMS ─────────────────────────────────────────────────────────────
   app.post('/api/send-sms', async (req, reply) => {
     const { name = 'Member', phone = '', goal = '', goalDesc = '' } = req.body as Record<string, string>;
@@ -212,12 +297,19 @@ export async function startHealthcareAppServer(): Promise<void> {
   // ── CI webhook ───────────────────────────────────────────────────────────
   app.post('/ci-webhook', async (req, reply) => {
     const payload = req.body as Record<string, unknown>;
-    const convId: string = (payload.conversationId as string) ?? '';
-    const eventType = payload.event ?? payload.status ?? payload.EventType ?? '(unknown)';
+    const data = (payload.data ?? payload) as Record<string, unknown>;
+    const convId: string = (data.conversationId as string) ?? (payload.conversationId as string) ?? '';
+    const eventType = payload.eventType ?? payload.event ?? payload.status ?? payload.EventType ?? '(unknown)';
     console.log(`[CI WEBHOOK] event=${eventType} convId=${convId}`);
 
     const operatorResults: unknown[] = (payload.operatorResults as unknown[]) ?? [];
-    console.log(`[CI] ${operatorResults.length} operator result(s) received`);
+
+    // Skip non-operator events (CONVERSATION_CREATED, COMMUNICATION_CREATED, etc.)
+    if (!operatorResults.length) {
+      return reply.send({ success: true });
+    }
+
+    console.log(`[CI] ${operatorResults.length} operator result(s) received convId=${convId}`);
     console.log(`[CI] config: SUMMARY_SID=${CI_SUMMARY_OPERATOR_SID || '(not set)'} OUTREACH_SID=${CI_OUTREACH_OPERATOR_SID || '(not set)'}`);
     console.log(`[CI] operator ids in payload: ${operatorResults.map(r => ((r as Record<string,unknown>)?.operator as Record<string,unknown>)?.id ?? '?').join(', ')}`);
 
@@ -228,14 +320,17 @@ export async function startHealthcareAppServer(): Promise<void> {
     let memberPhone: string | null = null;
     try {
       const tacRes = await fetch(`http://localhost:${TAC_PORT}/get-outbound-phone/${encodeURIComponent(convId)}`);
-      const tacData = await tacRes.json() as { phone?: string };
+      const tacData = await tacRes.json() as { phone?: string; profileId?: string };
       memberPhone = tacData.phone || null;
+      if (tacData.profileId) profileId = tacData.profileId;
     } catch (e) {
       console.warn('[CI] TAC server phone lookup failed:', e);
     }
 
-    if (memberPhone) {
+    if (!profileId && memberPhone) {
       profileId = await lookupProfileId(memberPhone);
+    }
+    if (memberPhone || profileId) {
       console.log(`[CI] outbound convId=${convId} phone=${memberPhone} profileId=${profileId ?? '(not found)'}`);
     }
 
@@ -249,14 +344,17 @@ export async function startHealthcareAppServer(): Promise<void> {
       const operatorId = (operator?.id as string | undefined) ?? '';
       console.log(`[CI] operator id=${operatorId} name=${operator?.name}`);
 
-      // Inbound fallback: resolve profile from participant if TAC phone lookup missed
+      // Inbound fallback: resolve profile from participant if TAC phone lookup missed.
+      // For outbound calls the Orchestrator labels our Twilio number as CUSTOMER —
+      // so skip any participant whose address matches our Twilio number.
       if (!profileId) {
         const execDetails = result.executionDetails as Record<string, unknown> | undefined;
-        const participants = (execDetails?.participants as { id: string; profileId?: string; type: string }[]) ?? [];
-        const customer = participants.find(p => p.type === 'CUSTOMER');
-        if (customer?.profileId) {
-          profileId = customer.profileId;
-          console.log(`[CI] inbound profileId=${profileId}`);
+        const participants = (execDetails?.participants as { id: string; profileId?: string; type: string; address?: string }[]) ?? [];
+        const ourNumber = process.env.TWILIO_TAC_PHONE_NUMBER ?? '';
+        const member = participants.find(p => p.profileId && p.address !== ourNumber);
+        if (member?.profileId) {
+          profileId = member.profileId;
+          console.log(`[CI] inbound fallback profileId=${profileId}`);
         }
       }
 
@@ -266,6 +364,32 @@ export async function startHealthcareAppServer(): Promise<void> {
       const isOutreachOp = CI_OUTREACH_OPERATOR_SID && operatorId === CI_OUTREACH_OPERATOR_SID;
       const isSummaryOp  = !isOutreachOp && (CI_SUMMARY_OPERATOR_SID ? operatorId === CI_SUMMARY_OPERATOR_SID : true);
       console.log(`[CI] classification: isSummaryOp=${isSummaryOp} isOutreachOp=${isOutreachOp}`);
+
+      // ── Live results grid: store result for any configured operator ───────
+      const liveOp = CI_OPERATORS.find(o => o.sid === operatorId);
+      console.log(`[CI] live check operatorId=${operatorId} liveOp=${liveOp?.label ?? 'none'} profileId=${profileId ?? 'null'} hasResult=${!!resultField}`);
+      if (liveOp && profileId && resultField) {
+        // Extract text result regardless of operator type
+        let liveText = (resultField.result as string) ?? '';
+        if (!liveText) {
+          const p = resultField.payload
+            ?? (resultField['com.twilio.cai.intelligence.JSONResult'] as Record<string, unknown> | undefined)?.payload;
+          if (typeof p === 'string') {
+            try { const parsed = JSON.parse(p); liveText = parsed?.summary ?? parsed?.text ?? JSON.stringify(parsed); }
+            catch { liveText = p; }
+          } else if (typeof p === 'object' && p !== null) {
+            liveText = JSON.stringify(p, null, 2);
+          }
+        }
+        const existing = ciLiveResults.get(profileId) ?? {};
+        existing[operatorId] = { label: liveOp.label, result: liveText, ts: formatTimestampPST(undefined) };
+        ciLiveResults.set(profileId, existing);
+        console.log(`[CI] live result stored operatorId=${operatorId} label=${liveOp.label} profileId=${profileId}`);
+        const sseCount = ciSseClients.get(profileId)?.size ?? 0;
+        console.log(`[CI] SSE push to ${sseCount} subscriber(s) for profileId=${profileId}`);
+        const event = JSON.stringify({ operators: CI_OPERATORS, results: existing });
+        ciSseClients.get(profileId)?.forEach(client => client.write(`data: ${event}\n\n`));
+      }
 
       // ── Summary operator ──────────────────────────────────────────────────
       if (isSummaryOp && !summaryText) {

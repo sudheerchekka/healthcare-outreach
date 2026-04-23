@@ -46,7 +46,15 @@ from bedrock_agentcore.runtime import AgentCoreRuntimeClient
 from tac import TAC, TACConfig
 from tac.channels.voice import VoiceChannel
 from tac.models.session import AuthorInfo, ConversationSession
-from tac.models.tac import TACMemoryResponse
+from dataclasses import dataclass, field as _field
+from typing import Any as _Any
+
+@dataclass
+class _MemoryContainer:
+    observations: list = _field(default_factory=list)
+    summaries: list = _field(default_factory=list)
+
+TACMemoryResponse = _MemoryContainer  # type: ignore
 from tac.models.voice import SetupMessage
 from tac.server import FastAPIWebSocketAdapter
 
@@ -69,6 +77,10 @@ APP_PORT = int(os.environ.get("APP_PORT", "8001"))
 # connect directly to agentcore dev server. Unset (or empty) = use deployed AgentCore.
 AGENT_LOCAL_URL = os.environ.get("AGENT_LOCAL_URL", "").rstrip("/")
 AGENT_LOCAL_WS_URL = AGENT_LOCAL_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws" if AGENT_LOCAL_URL else ""
+
+AGENT_BACKEND = os.environ.get("AGENT_BACKEND", "agentcore")  # "agentcore" | "elevenlabs"
+EL_PORT       = int(os.environ.get("ELEVENLABS_PORT", "8002"))
+EL_BASE       = f"http://localhost:{EL_PORT}"
 
 MEMORY_BASE = "https://memory.twilio.com"
 MEMORY_STORE_ID = os.environ.get("MEMORY_STORE_ID", "")
@@ -121,8 +133,8 @@ def _fetch_memory(profile_id: str) -> Optional[TACMemoryResponse]:
         auth = (MEMORY_API_KEY, MEMORY_API_TOKEN)
         obs_res = requests.get(f"{base}/Observations", auth=auth, timeout=5)
         sum_res = requests.get(f"{base}/ConversationSummaries", auth=auth, timeout=5)
-        observations = [type("Obs", (), {"content": o["content"]})() for o in obs_res.json().get("observations", [])]
-        summaries = [type("Sum", (), {"content": s["content"]})() for s in sum_res.json().get("summaries", [])]
+        observations = [type("Obs", (), {"content": o["content"]})() for o in (obs_res.json() or {}).get("observations") or []]
+        summaries = [type("Sum", (), {"content": s["content"]})() for s in (sum_res.json() or {}).get("summaries") or []]
         return TACMemoryResponse(observations=observations, summaries=summaries)
     except Exception as e:
         logger.warning(f"[memory] fetchMemory failed: {e}")
@@ -204,7 +216,11 @@ async def get_or_create_agent_ws(session_id: str) -> Optional[websockets.ClientC
                 runtime_arn=AGENTCORE_RUNTIME_ARN,
                 session_id=session_id,
             )
-        ws = await websockets.connect(url)
+        import ssl as _ssl
+        _ssl_ctx = _ssl.create_default_context()
+        _ssl_ctx.check_hostname = False
+        _ssl_ctx.verify_mode = _ssl.CERT_NONE
+        ws = await websockets.connect(url, ssl=_ssl_ctx)
         agent_connections[session_id] = ws
         logger.info(f"[agentcore] connected session_id={session_id} in {(time.time()-t0)*1000:.0f}ms")
         return ws
@@ -262,18 +278,30 @@ class OwlVoiceChannel(VoiceChannel):
         # Populate outbound_conversation_map immediately at call setup so the CI
         # webhook can find the member phone even if the caller hangs up before speaking.
         ctx = pending_outbound_context.get(conv_id)
-        if ctx and ctx.get("phone"):
-            outbound_conversation_map[conv_id] = ctx["phone"]
-            logger.info(f"[setup] outbound_conversation_map[{conv_id}]={ctx['phone']}")
-
-        # Pre-warm AgentCore WebSocket + memory in background so turn 1 is instant.
-        # _handle_setup is sync, so schedule the async work onto the event loop.
-        session_id = message.custom_parameters.profile_id or conv_id
         phone = ""
         if ctx:
             phone = ctx.get("phone", "")
         elif message.from_number:
             phone = message.from_number
+
+        # For outbound calls the Orchestrator labels our Twilio number as CUSTOMER and
+        # gives it a profile_id — but we want the member's existing profile as session_id.
+        # Look up the member profile by phone; fall back to the Maestro-assigned profile_id.
+        member_profile_id: Optional[str] = None
+        if ctx and phone:
+            member_profile_id = _lookup_profile_id(phone)
+            session_id = member_profile_id or message.custom_parameters.profile_id or conv_id
+            if member_profile_id:
+                logger.info(f"[setup] outbound session resolved to member profile {member_profile_id} for phone={phone}")
+        else:
+            session_id = message.custom_parameters.profile_id or conv_id
+
+        # Store phone + resolved profile in outbound_conversation_map so the CI webhook
+        # can write summaries to the correct member profile without re-running lookupProfileId.
+        if ctx and phone:
+            outbound_conversation_map[conv_id] = {"phone": phone, "profileId": member_profile_id or ""}
+            logger.info(f"[setup] outbound_conversation_map[{conv_id}] phone={phone} profileId={member_profile_id or '(pending)'}")
+
         asyncio.get_event_loop().create_task(
             _prewarm(conv_id, session_id, phone),
             name=f"prewarm-{conv_id}",
@@ -462,23 +490,38 @@ async def post_twiml(request: Request) -> Response:
 
 @app.post("/twiml-outbound")
 async def post_twiml_outbound(request: Request) -> Response:
-    """TwiML for outbound calls with personalized greeting.
-
-    The greeting is built by the Node.js app server and sent via /set-outbound-context.
-    Query params (member, goal, desc) are kept for the TAC setup custom parameters so
-    the Python server can look up the pending context by conversationId.
-    """
+    """TwiML for outbound calls. Routes to ConversationRelay (agentcore) or Stream (elevenlabs)."""
     params = dict(request.query_params)
     conv_id = params.get("conv_id", "")
-
     ctx = pending_outbound_context.get(conv_id) if conv_id else None
-    greeting = ctx.get("greeting", "") if ctx else "Hello! This is the Owl Health Care Team."
 
+    if AGENT_BACKEND == "elevenlabs":
+        proto    = request.headers.get("x-forwarded-proto", "https")
+        host     = request.headers.get("host", PUBLIC_DOMAIN)
+        ws_proto = "wss" if proto == "https" else "ws"
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="{ws_proto}://{host}/ws-el">
+      <Parameter name="conv_id" value="{conv_id}" />
+    </Stream>
+  </Connect>
+</Response>"""
+        return Response(content=twiml, media_type="application/xml")
+
+    # agentcore — ConversationRelay
+    greeting = ctx.get("greeting", "") if ctx else "Hello! This is the Owl Health Care Team."
     form = {k: str(v) for k, v in (await request.form()).items()}
     ws_url, callback_url = _get_urls(request)
+    # For outbound calls swap From/To so TAC labels the member (To) as CUSTOMER.
+    # This ensures memory extraction writes summaries to the member's profile,
+    # not to the Twilio from-number's profile.
+    raw_to   = form.get("To", "")
+    raw_from = form.get("From", "")
+    is_outbound = bool(ctx)
     twiml = await voice_channel.handle_incoming_call(
-        to_number=form.get("To", ""),
-        from_number=form.get("From", ""),
+        to_number=raw_from if is_outbound else raw_to,
+        from_number=raw_to if is_outbound else raw_from,
         options={
             "websocket_url": ws_url,
             "action_url": callback_url,
@@ -507,28 +550,101 @@ async def cr_callback(request: Request) -> Response:
 
 @app.post("/set-outbound-context")
 async def set_outbound_context(request: Request) -> dict:
-    """IPC endpoint — Node.js app server POSTs outbound ctx before dialling.
-
-    Body: { conv_id, name, goal, goalDesc, phone, greeting }
-    The conv_id is generated by the app server from the Twilio callSid or a UUID
-    and passed as a query param on the twiml-outbound URL so we can correlate.
-    """
+    """IPC endpoint — Node.js app server POSTs outbound ctx before dialling."""
     body = await request.json()
     conv_id = body.get("conv_id", "")
     if not conv_id:
         return {"success": False, "error": "conv_id required"}
     pending_outbound_context[conv_id] = body
     logger.info(f"[ipc] outbound context stored conv_id={conv_id} member={body.get('name')}")
+
+    # Forward to ElevenLabs server so it has context when the Stream WebSocket connects
+    if AGENT_BACKEND == "elevenlabs":
+        import httpx
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(f"{EL_BASE}/set-outbound-context", json=body, timeout=5)
+            logger.info(f"[ipc] forwarded context to ElevenLabs server conv_id={conv_id}")
+        except Exception as e:
+            logger.warning(f"[ipc] ElevenLabs context forward failed: {e}")
+
     return {"success": True}
 
 
 @app.get("/get-outbound-phone/{conv_id}")
 async def get_outbound_phone(conv_id: str) -> dict:
-    """IPC endpoint — Node.js CI webhook calls this to resolve member phone."""
-    # Do not pop — multiple CI operator webhooks fire per call and all need the phone.
-    # The entry stays until the next call for this member overwrites it.
-    phone = outbound_conversation_map.get(conv_id, "")
+    """IPC endpoint — Node.js CI webhook calls this to resolve member phone + profileId."""
+    entry = outbound_conversation_map.get(conv_id)
+    if isinstance(entry, dict):
+        return {"phone": entry.get("phone", ""), "profileId": entry.get("profileId", "")}
+    if isinstance(entry, str):
+        # Legacy string entry (elevenlabs ws-el path) — no profileId cached
+        return {"phone": entry, "profileId": ""}
+    phone = ""
+
+    # Fallback for elevenlabs backend: the stream start event has no Maestro conv_id,
+    # so the map is keyed by synthetic outbound-* id. Look up participants via Conversations API.
+    if conv_id.startswith("conv_conversation_") and MEMORY_API_KEY:
+        import httpx
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.get(
+                    f"https://conversations.twilio.com/v2/Conversations/{conv_id}/Participants",
+                    auth=(MEMORY_API_KEY, MEMORY_API_TOKEN),
+                    timeout=5,
+                )
+                participants = res.json().get("participants", [])
+                our_number = os.environ.get("TWILIO_TAC_PHONE_NUMBER", "")
+                for p in participants:
+                    addresses = p.get("addresses") or []
+                    address = addresses[0].get("address", "") if addresses else ""
+                    # Pick the participant whose address is not our Twilio number
+                    if address and address != our_number and address.startswith("+"):
+                        outbound_conversation_map[conv_id] = address
+                        logger.info(f"[get-outbound-phone] resolved via API {conv_id} → {address}")
+                        return {"phone": address}
+        except Exception as e:
+            logger.warning(f"[get-outbound-phone] API fallback failed: {e}")
+
     return {"phone": phone}
+
+
+@app.websocket("/ws-el")
+async def ws_el_proxy(websocket: WebSocket) -> None:
+    """Proxy Twilio <Stream> WebSocket to ElevenLabs server (elevenlabs backend only)."""
+    await websocket.accept()
+    el_ws_url = f"ws://localhost:{EL_PORT}/ws"
+    try:
+        async with websockets.connect(el_ws_url) as el_ws:
+            async def twilio_to_el() -> None:
+                async for msg in websocket.iter_text():
+                    # Intercept the start event to map Maestro conv_id → phone
+                    try:
+                        parsed = json.loads(msg)
+                        if parsed.get("event") == "start":
+                            start = parsed.get("start", {})
+                            logger.info(f"[ws-el] start event keys: {list(start.keys())} customParameters={start.get('customParameters')}")
+                            maestro_conv_id = start.get("conversationSid", "")
+                            outbound_conv_id = start.get("customParameters", {}).get("conv_id", "")
+                            if outbound_conv_id and outbound_conv_id in pending_outbound_context:
+                                ctx = pending_outbound_context[outbound_conv_id]
+                                phone = ctx.get("phone", "")
+                                # Map the real Maestro conv_id if available, else keep synthetic id
+                                map_key = maestro_conv_id or outbound_conv_id
+                                member_pid = _lookup_profile_id(phone) if phone else ""
+                                outbound_conversation_map[map_key] = {"phone": phone, "profileId": member_pid or ""}
+                                logger.info(f"[ws-el] mapped {map_key} → phone={phone} profileId={member_pid or '(none)'}")
+                    except Exception:
+                        pass
+                    await el_ws.send(msg)
+
+            async def el_to_twilio() -> None:
+                async for msg in el_ws:
+                    await websocket.send_text(msg if isinstance(msg, str) else msg.decode())
+
+            await asyncio.gather(twilio_to_el(), el_to_twilio())
+    except Exception as e:
+        logger.error(f"[ws-el] proxy error: {e}")
 
 
 @app.post("/ci-webhook")
