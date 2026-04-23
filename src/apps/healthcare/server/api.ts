@@ -43,7 +43,7 @@ const ciPendingTraits = new Map<string, Record<string, unknown>>();
 const ciFlushTimers   = new Map<string, ReturnType<typeof setTimeout>>();
 
 // ── Live operator results store (profileId → operatorSid → result) ──────────
-const ciLiveResults = new Map<string, Record<string, { label: string; result: string; ts: string }>>();
+const ciLiveResults = new Map<string, Record<string, { label: string; result: string; json?: unknown; ts: string }>>();
 // ── SSE subscribers (profileId → set of response streams) ───────────────────
 const ciSseClients = new Map<string, Set<import('http').ServerResponse>>();
 
@@ -250,6 +250,7 @@ export async function startHealthcareAppServer(): Promise<void> {
   // Subscribers keyed by profileId; each call to this endpoint registers a sender.
   app.get('/api/ci-results/:profileId/stream', async (req, reply) => {
     const { profileId } = req.params as { profileId: string };
+    reply.hijack();
     const raw = reply.raw;
     raw.setHeader('Content-Type', 'text/event-stream');
     raw.setHeader('Cache-Control', 'no-cache');
@@ -257,8 +258,9 @@ export async function startHealthcareAppServer(): Promise<void> {
     raw.setHeader('Access-Control-Allow-Origin', '*');
     raw.flushHeaders();
 
-    // Send current state immediately
-    const snapshot = { operators: CI_OPERATORS, results: ciLiveResults.get(profileId) ?? {} };
+    // Clear stored results so page always starts fresh on reload
+    ciLiveResults.delete(profileId);
+    const snapshot = { operators: CI_OPERATORS, results: {} };
     raw.write(`data: ${JSON.stringify(snapshot)}\n\n`);
 
     // Register subscriber
@@ -280,21 +282,28 @@ export async function startHealthcareAppServer(): Promise<void> {
       const { AccessToken } = twilioJwt;
       const { VoiceGrant } = AccessToken;
       const token = new AccessToken(ACCOUNT_SID, process.env.TWILIO_API_KEY ?? '', process.env.TWILIO_API_TOKEN ?? '', { identity: 'care-team-agent', ttl: 3600 });
-      token.addGrant(new VoiceGrant({ outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID ?? '', incomingAllow: false }));
+      token.addGrant(new VoiceGrant({ incomingAllow: true }));
       reply.send({ token: token.toJwt() });
     } catch (e) {
       reply.status(500).send({ error: String(e) });
     }
   });
 
-  // ── TwiML for browser-initiated outbound call ────────────────────────────
-  app.post('/api/browser-call-twiml', async (req, reply) => {
-    const { To } = req.body as Record<string, string>;
-    const dialTo = OUTBOUND_CALL_TO || To || '';
-    if (!dialTo) return reply.type('application/xml').send('<Response><Say>No destination number.</Say></Response>');
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="${PHONE_NUMBER}"><Number>${dialTo}</Number></Dial></Response>`;
-    reply.type('application/xml').send(twiml);
+  // ── Browser call: place outbound via REST API so CO captures it ──────────
+  app.post('/api/browser-call', async (req, reply) => {
+    const { phone = '' } = req.body as Record<string, string>;
+    const dialTo = OUTBOUND_CALL_TO || normalizePhone(phone);
+    if (!dialTo) return reply.status(400).send({ success: false, error: 'No destination number' });
+    const answerUrl = `https://${VOICE_DOMAIN}/browser-answer-twiml`;
+    try {
+      const call = await twilioClient.calls.create({ to: dialTo, from: PHONE_NUMBER, url: answerUrl });
+      console.log(`[browser-call] placed callSid=${call.sid} to=${dialTo}`);
+      reply.send({ success: true, call_sid: call.sid });
+    } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
   });
+
 
   // ── Send SMS ─────────────────────────────────────────────────────────────
   app.post('/api/send-sms', async (req, reply) => {
@@ -390,23 +399,41 @@ export async function startHealthcareAppServer(): Promise<void> {
       // ── Live results grid: store result for any configured operator ───────
       const liveOp = CI_OPERATORS.find(o => o.sid === operatorId);
       console.log(`[CI] live check operatorId=${operatorId} liveOp=${liveOp?.label ?? 'none'} profileId=${profileId ?? 'null'} hasResult=${!!resultField}`);
+      if (liveOp) console.log(`[CI] resultField raw: ${JSON.stringify(resultField).slice(0, 500)}`);
       if (liveOp && profileId && resultField) {
-        // Extract text result — handles TEXT, CLASSIFICATION, and JSON operator types
+        // Extract result — preserves raw JSON object for structured operators (e.g. adherence)
         let liveText = (resultField.result as string) ?? '';
         if (!liveText) liveText = (resultField.label as string) ?? '';  // CLASSIFICATION
+        let liveJson: unknown = null;
+        // Check for categories directly on resultField (Script Adherence format)
+        if (resultField.categories) { liveJson = resultField; liveText = '__json__'; }
         if (!liveText) {
           const p = resultField.payload
             ?? (resultField['com.twilio.cai.intelligence.JSONResult'] as Record<string, unknown> | undefined)?.payload;
           if (typeof p === 'string') {
-            try { const parsed = JSON.parse(p); liveText = parsed?.summary ?? parsed?.text ?? JSON.stringify(parsed); }
-            catch { liveText = p; }
+            try {
+              const parsed = JSON.parse(p);
+              if (parsed?.categories) { liveJson = parsed; liveText = '__json__'; }
+              else liveText = parsed?.summary ?? parsed?.text ?? JSON.stringify(parsed);
+            } catch { liveText = p; }
           } else if (typeof p === 'object' && p !== null) {
-            liveText = JSON.stringify(p, null, 2);
+            const po = p as Record<string, unknown>;
+            if (po.categories) { liveJson = po; liveText = '__json__'; }
+            else liveText = JSON.stringify(po, null, 2);
           }
         }
         const existing = ciLiveResults.get(profileId) ?? {};
-        existing[operatorId] = { label: liveOp.label, result: liveText, ts: formatTimestampPST(undefined) };
+        existing[operatorId] = { label: liveOp.label, result: liveText, json: liveJson, ts: formatTimestampPST(undefined) };
         ciLiveResults.set(profileId, existing);
+        if (liveJson && (liveJson as Record<string,unknown>).categories) {
+          const cats = (liveJson as { categories: { category_key: string; criteria: { criteria_key: string; criteria_met: string }[] }[] }).categories;
+          cats.forEach(cat => {
+            cat.criteria.forEach(c => {
+              const met = c.criteria_met === 'Passed' || c.criteria_met === 'Succeeded';
+              console.log(`[CI] adherence ${met ? '✓' : '✗'} ${cat.category_key} / ${c.criteria_key}: ${c.criteria_met}`);
+            });
+          });
+        }
         console.log(`[CI] live result stored operatorId=${operatorId} label=${liveOp.label} profileId=${profileId}`);
         const sseCount = ciSseClients.get(profileId)?.size ?? 0;
         console.log(`[CI] SSE push to ${sseCount} subscriber(s) for profileId=${profileId}`);

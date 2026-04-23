@@ -665,6 +665,18 @@ async def ci_webhook_proxy(request: Request) -> dict:
         return {"success": False}
 
 
+@app.post("/browser-answer-twiml")
+async def browser_answer_twiml(request: Request) -> Response:
+    """TwiML: connect member's answered call back to the browser via Twilio Client."""
+    twiml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial>
+    <Client>care-team-agent</Client>
+  </Dial>
+</Response>"""
+    return Response(content=twiml, media_type="application/xml")
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "healthy"}
