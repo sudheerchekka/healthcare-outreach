@@ -307,18 +307,42 @@ export async function startHealthcareAppServer(): Promise<void> {
 
   // ── Send SMS ─────────────────────────────────────────────────────────────
   app.post('/api/send-sms', async (req, reply) => {
-    const { name = 'Member', phone = '', goal = '', goalDesc = '' } = req.body as Record<string, string>;
+    const { name = 'Member', phone = '', goal = '', goalDesc = '', customBody = '' } = req.body as Record<string, string>;
     const sendTo = OUTBOUND_CALL_TO || normalizePhone(phone);
     if (!sendTo) return reply.status(400).send({ success: false, error: 'No destination number configured' });
 
-    const lines = [`Hi ${name}, this is the Owl Health Care Team.`];
-    if (goal) lines.push(`We're reaching out regarding: ${goal}.`);
-    if (goalDesc) lines.push(goalDesc);
-    lines.push('Please reply or call us if you have any questions.');
+    let smsBody = customBody.trim();
+    if (!smsBody) {
+      const lines = [`Hi ${name}, this is the Owl Health Care Team.`];
+      if (goal) lines.push(`We're reaching out regarding: ${goal}.`);
+      if (goalDesc) lines.push(goalDesc);
+      lines.push('Please reply or call us if you have any questions.');
+      smsBody = lines.join(' ');
+    }
 
     try {
-      const msg = await twilioClient.messages.create({ to: sendTo, from: PHONE_NUMBER, body: lines.join(' ') });
+      const msg = await twilioClient.messages.create({ to: sendTo, from: PHONE_NUMBER, body: smsBody });
       console.log(`[send-sms] sent to ${sendTo} sid=${msg.sid}`);
+
+      // Write observation to member's profile
+      try {
+        const profileId = await lookupProfileId(normalizePhone(phone));
+        if (profileId) {
+          const obsContent = `SMS sent to member: "${smsBody}"`;
+          await axios.post(
+            `${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profileId}/Observations`,
+            { observations: [{ content: obsContent, occurredAt: new Date().toISOString(), source: 'care-team-portal' }] },
+            { auth: memoryAuth },
+          );
+          console.log(`[send-sms] observation written profileId=${profileId}`);
+        } else {
+          console.warn(`[send-sms] no profileId found for ${phone} — skipping observation`);
+        }
+      } catch (obsErr) {
+        const axErr = obsErr as { response?: { data?: unknown } };
+        console.warn(`[send-sms] observation write failed:`, axErr.response?.data ?? obsErr);
+      }
+
       reply.send({ success: true, message_sid: msg.sid });
     } catch (e) {
       reply.status(500).send({ success: false, error: String(e) });

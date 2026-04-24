@@ -240,6 +240,34 @@
     .btn-reset:hover { background: #991b1b; color: var(--white); transform: translateY(-1px); box-shadow: 0 4px 10px rgba(153,27,27,.25); }
     .btn svg { flex-shrink: 0; }
 
+    /* ── SMS Modal ──────────────────────────────────────────────── */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,.45); z-index: 1000;
+      align-items: center; justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: #fff; border-radius: 12px; padding: 28px 32px;
+      width: 480px; max-width: 95vw; box-shadow: 0 20px 60px rgba(0,0,0,.2);
+    }
+    .modal h3 { margin: 0 0 4px; font-size: 16px; }
+    .modal .modal-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 18px; }
+    .modal label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 5px; }
+    .modal select, .modal textarea {
+      width: 100%; box-sizing: border-box; border: 1px solid #d1d5db;
+      border-radius: 7px; padding: 9px 11px; font-size: 13px; font-family: inherit;
+      outline: none; transition: border .15s;
+    }
+    .modal select:focus, .modal textarea:focus { border-color: var(--primary); }
+    .modal textarea { resize: vertical; min-height: 110px; margin-top: 0; }
+    .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+    .btn-cancel { background: #f3f4f6; color: #374151; padding: 8px 18px; border-radius: 7px; border: none; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .btn-cancel:hover { background: #e5e7eb; }
+    .btn-send { background: var(--primary); color: #fff; padding: 8px 18px; border-radius: 7px; border: none; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .btn-send:hover { background: var(--primary-dark, #c81a2f); }
+    .btn-send:disabled { opacity: .5; cursor: not-allowed; }
+
     /* ── Loading / error / empty states ────────────────────────── */
     .state-box { text-align: center; padding: 60px 20px; color: var(--text-muted); }
     .state-box svg { margin-bottom: 12px; opacity: .4; }
@@ -535,36 +563,8 @@
   }
 
   /* ── Action handlers ─────────────────────────────────────────── */
-  async function triggerSMS(idx) {
-    const m = members[idx];
-    const btn = event.currentTarget;
-    const originalHTML = btn.innerHTML;
-    btn.disabled = true;
-    btn.textContent = '⏳';
-
-    try {
-      const res = await fetch('http://localhost:8001/api/send-sms', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: m.name,
-          phone: m.phone,
-          goal: m.next_follow_up,
-          goalDesc: m.next_follow_up_reason,
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        showToast(`💬 SMS sent to ${m.name}`, 'success');
-      } else {
-        showToast(`SMS failed: ${data.error}`, 'error');
-      }
-    } catch (e) {
-      showToast('Could not reach app server. Is it running on port 8001?', 'error');
-    } finally {
-      btn.disabled = false;
-      btn.innerHTML = originalHTML;
-    }
+  function triggerSMS(idx) {
+    openSmsModal(idx);
   }
 
   async function triggerVoice(idx) {
@@ -637,8 +637,96 @@
     window.location.href = `/member-detail.html?profile_id=${encodeURIComponent(profileId)}`;
   }
 
+  /* ── SMS Modal ───────────────────────────────────────────────── */
+  const SMS_TEMPLATES = {
+    custom: { label: 'Custom message', body: '' },
+    appointment: {
+      label: 'Appointment notification',
+      body: (m) => `Hi ${m.name}, this is the Owl Health Care Team. This is a reminder about your upcoming appointment. Please call us if you need to reschedule or have any questions. Thank you!`,
+    },
+    claim: {
+      label: 'Claim status update',
+      body: (m) => `Hi ${m.name}, this is the Owl Health Care Team. We have an update regarding your recent claim. Please call us at your earliest convenience so we can walk you through the details.`,
+    },
+    followup: {
+      label: 'Follow-up outreach',
+      body: (m) => `Hi ${m.name}, this is the Owl Health Care Team reaching out about: ${m.next_follow_up || 'your care plan'}. ${m.next_follow_up_reason || ''} Please reply or call us if you have any questions.`.trim(),
+    },
+  };
+
+  let smsMember = null;
+
+  function openSmsModal(idx) {
+    smsMember = members[idx];
+    document.getElementById('smsModalName').textContent  = smsMember.name;
+    document.getElementById('smsModalPhone').textContent = smsMember.phone;
+    document.getElementById('smsTemplate').value = 'followup';
+    updateSmsBody();
+    document.getElementById('smsModal').classList.add('open');
+  }
+
+  function closeSmsModal() {
+    document.getElementById('smsModal').classList.remove('open');
+    smsMember = null;
+  }
+
+  function updateSmsBody() {
+    const key = document.getElementById('smsTemplate').value;
+    const tpl = SMS_TEMPLATES[key];
+    if (!tpl) return;
+    const body = typeof tpl.body === 'function' ? tpl.body(smsMember) : tpl.body;
+    document.getElementById('smsBody').value = body;
+  }
+
+  async function sendSmsFromModal() {
+    const btn = document.getElementById('btnSendSms');
+    const body = document.getElementById('smsBody').value.trim();
+    if (!body) return;
+    btn.disabled = true; btn.textContent = 'Sending…';
+    try {
+      const res = await fetch('http://localhost:8001/api/send-sms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: smsMember.name, phone: smsMember.phone, customBody: body }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`SMS sent to ${smsMember.name}`, 'success');
+        closeSmsModal();
+      } else {
+        showToast(`SMS failed: ${data.error}`, 'error');
+      }
+    } catch (e) {
+      showToast('Could not reach app server. Is it running on port 8001?', 'error');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Send';
+    }
+  }
+
   /* ── Init ────────────────────────────────────────────────────── */
   loadMembers();
 </script>
+
+<!-- SMS Modal -->
+<div class="modal-overlay" id="smsModal" onclick="if(event.target===this)closeSmsModal()">
+  <div class="modal">
+    <h3>Send SMS</h3>
+    <div class="modal-sub">To: <strong id="smsModalName"></strong> &middot; <span id="smsModalPhone"></span></div>
+    <label for="smsTemplate">Template</label>
+    <select id="smsTemplate" onchange="updateSmsBody()" style="margin-bottom:14px">
+      <option value="followup">Follow-up outreach</option>
+      <option value="appointment">Appointment notification</option>
+      <option value="claim">Claim status update</option>
+      <option value="custom">Custom message</option>
+    </select>
+    <label for="smsBody">Message</label>
+    <textarea id="smsBody" placeholder="Type your message…"></textarea>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeSmsModal()">Cancel</button>
+      <button class="btn-send" id="btnSendSms" onclick="sendSmsFromModal()">Send</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
