@@ -5,6 +5,7 @@ import fastifyFormBody from '@fastify/formbody';
 import axios from 'axios';
 import { Twilio, jwt as twilioJwt } from 'twilio';
 import * as path from 'path';
+import { readFile, writeFile } from 'fs/promises';
 
 import { buildGreeting } from '../../../prompts';
 import { MemberRow, OutboundContext } from '../../../types';
@@ -305,6 +306,38 @@ export async function startHealthcareAppServer(): Promise<void> {
   });
 
 
+  // ── Admin: system prompt ─────────────────────────────────────────────────
+  const SYSTEM_PROMPT_FILE          = path.join(process.cwd(), 'src/apps/healthcare/agent/src/system_prompt.txt');
+  const SYSTEM_PROMPT_INBOUND_FILE  = path.join(process.cwd(), 'src/tac/system_prompt_inbound.txt');
+
+  async function readPromptFile(filePath: string): Promise<string> {
+    try { return (await readFile(filePath, 'utf8')).trim(); } catch { return ''; }
+  }
+
+  app.get('/api/admin/system-prompt', async (_req, reply) => {
+    reply.send({ prompt: await readPromptFile(SYSTEM_PROMPT_FILE) });
+  });
+
+  app.post('/api/admin/system-prompt', async (req, reply) => {
+    const { prompt } = req.body as { prompt: string };
+    if (typeof prompt !== 'string') return reply.status(400).send({ success: false, error: 'prompt required' });
+    await writeFile(SYSTEM_PROMPT_FILE, prompt.trim() + '\n', 'utf8');
+    console.log(`[admin] system_prompt.txt updated (${prompt.trim().length} chars)`);
+    reply.send({ success: true });
+  });
+
+  app.get('/api/admin/system-prompt-inbound', async (_req, reply) => {
+    reply.send({ prompt: await readPromptFile(SYSTEM_PROMPT_INBOUND_FILE) });
+  });
+
+  app.post('/api/admin/system-prompt-inbound', async (req, reply) => {
+    const { prompt } = req.body as { prompt: string };
+    if (typeof prompt !== 'string') return reply.status(400).send({ success: false, error: 'prompt required' });
+    await writeFile(SYSTEM_PROMPT_INBOUND_FILE, prompt.trim() + '\n', 'utf8');
+    console.log(`[admin] system_prompt_inbound.txt updated (${prompt.trim().length} chars)`);
+    reply.send({ success: true });
+  });
+
   // ── Send SMS ─────────────────────────────────────────────────────────────
   app.post('/api/send-sms', async (req, reply) => {
     const { name = 'Member', phone = '', goal = '', goalDesc = '', customBody = '' } = req.body as Record<string, string>;
@@ -324,23 +357,22 @@ export async function startHealthcareAppServer(): Promise<void> {
       const msg = await twilioClient.messages.create({ to: sendTo, from: PHONE_NUMBER, body: smsBody });
       console.log(`[send-sms] sent to ${sendTo} sid=${msg.sid}`);
 
-      // Write observation to member's profile
-      try {
-        const profileId = await lookupProfileId(normalizePhone(phone));
-        if (profileId) {
-          const obsContent = `SMS sent to member: "${smsBody}"`;
-          await axios.post(
-            `${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profileId}/Observations`,
-            { observations: [{ content: obsContent, occurredAt: new Date().toISOString(), source: 'care-team-portal' }] },
-            { auth: memoryAuth },
-          );
-          console.log(`[send-sms] observation written profileId=${profileId}`);
-        } else {
-          console.warn(`[send-sms] no profileId found for ${phone} — skipping observation`);
+      // Write observation manually only if SMS_WRITE_OBSERVATION=true (CO writes it automatically otherwise)
+      if (process.env.SMS_WRITE_OBSERVATION === 'true') {
+        try {
+          const profileId = await lookupProfileId(normalizePhone(phone));
+          if (profileId) {
+            await axios.post(
+              `${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profileId}/Observations`,
+              { observations: [{ content: `SMS sent to member: "${smsBody}"`, occurredAt: new Date().toISOString(), source: 'care-team-portal' }] },
+              { auth: memoryAuth },
+            );
+            console.log(`[send-sms] observation written profileId=${profileId}`);
+          }
+        } catch (obsErr) {
+          const axErr = obsErr as { response?: { data?: unknown } };
+          console.warn(`[send-sms] observation write failed:`, axErr.response?.data ?? obsErr);
         }
-      } catch (obsErr) {
-        const axErr = obsErr as { response?: { data?: unknown } };
-        console.warn(`[send-sms] observation write failed:`, axErr.response?.data ?? obsErr);
       }
 
       reply.send({ success: true, message_sid: msg.sid });

@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import os
+import pathlib
 import time
 from collections.abc import AsyncGenerator
 from typing import Optional
@@ -127,6 +128,24 @@ def _lookup_profile_id(phone: str) -> Optional[str]:
         return None
 
 
+def _fetch_profile_traits(profile_id: str) -> dict:
+    """Fetch contact + outreach traits for a profile."""
+    try:
+        res = requests.get(
+            f"{MEMORY_BASE}/v1/Stores/{MEMORY_STORE_ID}/Profiles/{profile_id}",
+            auth=(MEMORY_API_KEY, MEMORY_API_TOKEN),
+            timeout=5,
+        )
+        data = res.json()
+        traits: dict = {}
+        for trait_group in (data.get("traits") or []):
+            traits.update(trait_group.get("attributes") or {})
+        return traits
+    except Exception as e:
+        logger.warning(f"[memory] fetchProfileTraits failed: {e}")
+        return {}
+
+
 def _fetch_memory(profile_id: str) -> Optional[TACMemoryResponse]:
     try:
         base = f"{MEMORY_BASE}/v1/Stores/{MEMORY_STORE_ID}/Profiles/{profile_id}"
@@ -141,30 +160,44 @@ def _fetch_memory(profile_id: str) -> Optional[TACMemoryResponse]:
         return None
 
 
-async def _prefetch_memory(phone: str) -> Optional[TACMemoryResponse]:
-    """Run blocking memory fetch in thread pool so it doesn't block the event loop."""
+async def _prefetch_memory(phone: str) -> tuple[Optional[TACMemoryResponse], dict]:
+    """Run blocking memory + traits fetch in thread pool. Returns (memory, traits)."""
     loop = asyncio.get_event_loop()
     t0 = time.time()
     try:
         profile_id = await loop.run_in_executor(None, _lookup_profile_id, phone)
-        memory = await loop.run_in_executor(None, _fetch_memory, profile_id) if profile_id else None
+        if profile_id:
+            memory, traits = await asyncio.gather(
+                loop.run_in_executor(None, _fetch_memory, profile_id),
+                loop.run_in_executor(None, _fetch_profile_traits, profile_id),
+            )
+        else:
+            memory, traits = None, {}
         obs = len(memory.observations) if memory else 0
         sums = len(memory.summaries) if memory else 0
-        logger.info(f"[memory] prefetch phone={phone} profileId={profile_id or 'none'} obs={obs} summaries={sums} in {(time.time()-t0)*1000:.0f}ms")
-        return memory
+        logger.info(f"[memory] prefetch phone={phone} profileId={profile_id or 'none'} obs={obs} summaries={sums} traits={len(traits)} in {(time.time()-t0)*1000:.0f}ms")
+        return memory, traits
     except Exception as e:
         logger.warning(f"[memory] prefetch error: {e}")
-        return None
+        return None, {}
 
 
-def _build_memory_context(memory: Optional[TACMemoryResponse]) -> str:
-    if not memory:
-        return ""
+def _build_memory_context(memory: Optional[TACMemoryResponse], traits: Optional[dict] = None) -> str:
     sections = []
-    if memory.observations:
+    if traits:
+        trait_lines = []
+        if traits.get("name"):        trait_lines.append(f"- Name: {traits['name']}")
+        if traits.get("phone"):       trait_lines.append(f"- Phone: {traits['phone']}")
+        if traits.get("nextFollowUp"): trait_lines.append(f"- Next follow-up goal: {traits['nextFollowUp']}")
+        if traits.get("nextFollowUpReason"): trait_lines.append(f"- Follow-up details: {traits['nextFollowUpReason']}")
+        if traits.get("status"):      trait_lines.append(f"- Outreach status: {traits['status']}")
+        if traits.get("lastCallSummary"): trait_lines.append(f"- Last call summary: {traits['lastCallSummary']}")
+        if trait_lines:
+            sections.append("### Member Profile\n" + "\n".join(trait_lines))
+    if memory and memory.observations:
         lines = [f"- {o.content}" for o in memory.observations]
         sections.append("### Previous Observations\n" + "\n".join(lines))
-    if memory.summaries:
+    if memory and memory.summaries:
         lines = [f"- {s.content}" for s in memory.summaries]
         sections.append("### Previous Summaries\n" + "\n".join(lines))
     if not sections:
@@ -177,20 +210,24 @@ def _build_system_prompt(name: str, goal: str, goal_desc: str) -> str:
         f"You are calling {name} on behalf of the Owl Health care team.",
         f"The purpose of this call is: {goal}." if goal else "",
         f"Follow-up guidance: {goal_desc}" if goal_desc else "",
-        "Be warm, concise, and natural — no bullet points, no bold text.",
-        "The member has already been greeted. Do not re-introduce yourself.",
-        "Steer toward a clear next step.",
     ]
     return "\n".join(l for l in lines if l)
 
 
+_INBOUND_PROMPT_FILE = pathlib.Path(__file__).parent / "system_prompt_inbound.txt"
+_DEFAULT_INBOUND_PROMPT = (
+    "You are an Owl Health care coordination agent handling an inbound member call. "
+    "Be warm and conversational. Speak in plain, natural sentences — no bullet points, no bold or italic text. "
+    "Keep responses brief and easy to follow on a phone call. "
+    "Identify how you can help and guide the member toward a clear next step."
+)
+
 def _build_inbound_system_prompt() -> str:
-    return (
-        "You are an Owl Health care coordination agent handling an inbound member call. "
-        "Be warm and conversational. Speak in plain, natural sentences — no bullet points, no bold or italic text. "
-        "Keep responses brief and easy to follow on a phone call. "
-        "Identify how you can help and guide the member toward a clear next step."
-    )
+    if _INBOUND_PROMPT_FILE.exists():
+        text = _INBOUND_PROMPT_FILE.read_text().strip()
+        if text:
+            return text
+    return _DEFAULT_INBOUND_PROMPT
 
 # ---------------------------------------------------------------------------
 # AgentCore WebSocket pool
@@ -236,10 +273,11 @@ async def _prewarm(conv_id: str, session_id: str, phone: str) -> None:
     mem_task = asyncio.create_task(_prefetch_memory(phone)) if phone else None
 
     ws = await ws_task
-    memory = await mem_task if mem_task else None
+    memory_result = await mem_task if mem_task else (None, {})
+    memory, traits = memory_result if isinstance(memory_result, tuple) else (memory_result, {})
 
-    if memory:
-        memory_context_cache[conv_id] = _build_memory_context(memory)
+    if memory or traits:
+        memory_context_cache[conv_id] = _build_memory_context(memory, traits)
 
     logger.info(f"[prewarm] done conv_id={conv_id} ws={'ok' if ws else 'FAILED'} memory={'ok' if memory else 'none'} in {(time.time()-t0)*1000:.0f}ms")
 
@@ -347,8 +385,10 @@ async def handle_message_ready(
             logger.info(f"[healthcare] using pre-warmed memory conv_id={conv_id}")
         else:
             if phone and not memory_response:
-                memory_response = await _prefetch_memory(phone)
-            mem_ctx = _build_memory_context(memory_response)
+                memory_response, traits = await _prefetch_memory(phone)
+            else:
+                traits = {}
+            mem_ctx = _build_memory_context(memory_response, traits)
         greeting = greeting_cache.get(conv_id)
         bedrock_mode = os.environ.get("BEDROCK_AGENT_MODE") == "agentcore"
         if greeting and bedrock_mode:
@@ -374,6 +414,11 @@ async def handle_message_ready(
         "systemPrompt": system_prompt,
         "memoryContext": enriched,
     }
+
+    if system_prompt:
+        logger.info(f"[agent] turn1 systemPrompt:\n{system_prompt}")
+    if enriched:
+        logger.info(f"[agent] turn1 memoryContext:\n{enriched}")
 
     try:
         await agent_ws.send(json.dumps(agent_msg))

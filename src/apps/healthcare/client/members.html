@@ -240,6 +240,30 @@
     .btn-reset:hover { background: #991b1b; color: var(--white); transform: translateY(-1px); box-shadow: 0 4px 10px rgba(153,27,27,.25); }
     .btn svg { flex-shrink: 0; }
 
+    /* ── Page tabs (Members / Admin) ───────────────────────────── */
+    .page-tabs { display: flex; gap: 4px; padding: 0 32px; border-bottom: 1px solid var(--border); background: #fff; }
+    .page-tab {
+      padding: 12px 20px; font-size: 13px; font-weight: 600; cursor: pointer;
+      border-bottom: 2px solid transparent; color: var(--text-muted); transition: all .15s;
+    }
+    .page-tab:hover { color: var(--text); }
+    .page-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+    /* ── Admin panel ────────────────────────────────────────────── */
+    .admin-panel { max-width: 780px; margin: 32px auto; padding: 0 32px; }
+    .admin-panel h2 { font-size: 18px; font-weight: 700; margin: 0 0 4px; }
+    .admin-panel .admin-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
+    .admin-panel label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 6px; }
+    .admin-panel textarea {
+      width: 100%; box-sizing: border-box; border: 1px solid #d1d5db; border-radius: 8px;
+      padding: 12px 14px; font-size: 13px; font-family: ui-monospace, monospace;
+      line-height: 1.6; resize: vertical; min-height: 260px; outline: none; transition: border .15s;
+    }
+    .admin-panel textarea:focus { border-color: var(--primary); }
+    .admin-save { margin-top: 12px; background: var(--primary); color: #fff; border: none; border-radius: 7px; padding: 9px 22px; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .admin-save:hover { background: #c81a2f; }
+    .admin-save:disabled { opacity: .5; cursor: not-allowed; }
+
     /* ── SMS Modal ──────────────────────────────────────────────── */
     .modal-overlay {
       display: none; position: fixed; inset: 0;
@@ -337,7 +361,28 @@
   </div>
 </div>
 
-<main>
+<div class="page-tabs">
+  <div class="page-tab active" id="tabMembers" onclick="switchPageTab('members')">Members</div>
+  <div class="page-tab" id="tabAdmin" onclick="switchPageTab('admin')">Admin</div>
+</div>
+
+<div id="panelAdmin" style="display:none">
+  <div class="admin-panel">
+    <h2>Outbound Agent System Prompt</h2>
+    <p class="admin-sub">Base prompt for outbound calls — member context (name, goal, follow-up) is appended at call time. Saved to <code>agent/src/system_prompt.txt</code>, picked up on next <code>agentcore deploy</code> or agent restart.</p>
+    <label for="promptTextarea">System Prompt</label>
+    <textarea id="promptTextarea" placeholder="Loading…"></textarea>
+    <button class="admin-save" id="btnSavePrompt" onclick="savePrompt()">Save</button>
+
+    <h2 style="margin-top:36px">Inbound Agent System Prompt</h2>
+    <p class="admin-sub">Appended to the base prompt for inbound calls. Saved to <code>tac/system_prompt_inbound.txt</code>, picked up on next TAC server restart.</p>
+    <label for="promptInboundTextarea">System Prompt</label>
+    <textarea id="promptInboundTextarea" placeholder="Loading…"></textarea>
+    <button class="admin-save" id="btnSaveInboundPrompt" onclick="saveInboundPrompt()">Save</button>
+  </div>
+</div>
+
+<main id="panelMembers">
   <div class="toolbar">
     <div class="toolbar-left">
       <h2>Members</h2>
@@ -700,6 +745,57 @@
       showToast('Could not reach app server. Is it running on port 8001?', 'error');
     } finally {
       btn.disabled = false; btn.textContent = 'Send';
+    }
+  }
+
+  /* ── Page tab switching ──────────────────────────────────────── */
+  function switchPageTab(name) {
+    document.getElementById('panelMembers').style.display = name === 'members' ? '' : 'none';
+    document.getElementById('panelAdmin').style.display   = name === 'admin'   ? '' : 'none';
+    document.getElementById('tabMembers').classList.toggle('active', name === 'members');
+    document.getElementById('tabAdmin').classList.toggle('active', name === 'admin');
+    if (name === 'admin') loadPrompt();
+  }
+
+  async function loadPrompt() {
+    const [outRes, inRes] = await Promise.allSettled([
+      fetch('http://localhost:8001/api/admin/system-prompt'),
+      fetch('http://localhost:8001/api/admin/system-prompt-inbound'),
+    ]);
+    const ta  = document.getElementById('promptTextarea');
+    const tai = document.getElementById('promptInboundTextarea');
+    ta.value  = outRes.status === 'fulfilled' ? (await outRes.value.json()).prompt || '' : '';
+    tai.value = inRes.status  === 'fulfilled' ? (await inRes.value.json()).prompt  || '' : '';
+  }
+
+  async function savePrompt() {
+    await _savePromptTo('btnSavePrompt', 'promptTextarea',
+      'http://localhost:8001/api/admin/system-prompt', 'Outbound prompt saved');
+  }
+
+  async function saveInboundPrompt() {
+    await _savePromptTo('btnSaveInboundPrompt', 'promptInboundTextarea',
+      'http://localhost:8001/api/admin/system-prompt-inbound', 'Inbound prompt saved');
+  }
+
+  async function _savePromptTo(btnId, taId, url, successMsg) {
+    const btn  = document.getElementById(btnId);
+    const text = document.getElementById(taId).value.trim();
+    if (!text) return;
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const res  = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: text }),
+      });
+      const data = await res.json();
+      if (data.success) showToast(successMsg, 'success');
+      else showToast(`Save failed: ${data.error}`, 'error');
+    } catch {
+      showToast('Could not reach app server', 'error');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Save';
     }
   }
 

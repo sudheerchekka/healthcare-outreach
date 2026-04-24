@@ -18,6 +18,7 @@ HTTP entrypoint (legacy / agentcore invoke):
 import asyncio
 import json
 import os
+import pathlib
 from strands import Agent
 from strands.types.content import Messages
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -33,16 +34,31 @@ MEMORY_ID = os.getenv("BEDROCK_AGENTCORE_MEMORY_ID", "")  # injected by AgentCor
 
 log.info(f"[startup] BEDROCK_AGENTCORE_MEMORY_ID={MEMORY_ID or '(NOT SET — STM disabled)'} REGION={REGION}")
 
-SYSTEM_PROMPT = """You are an Owl Health care coordination agent handling member calls on behalf of the care team. \
-Be warm and conversational. Speak in plain, natural sentences — no bullet points, no bold or italic text, no special formatting of any kind. \
-Keep each response brief and easy to follow on a phone call. \
-The member has already been greeted — do not re-introduce yourself or ask if they have time to talk. \
-When call context is provided, use it to personalize your responses and guide follow-up questions naturally. \
-Avoid asking for information you already have from the member's profile or prior call summaries. \
-Ask no more than 3 questions total across the entire call. Once you have collected answers to those questions, \
-thank the member warmly by name, let them know the care team will follow up if needed, and wrap up the conversation. \
-If at any point the member says they cannot talk, are busy, or says goodbye, immediately acknowledge and wrap up \
-warmly — do not continue asking questions."""
+_DEFAULT_SYSTEM_PROMPT = (
+    "You are an Owl Health care coordination agent handling member calls on behalf of the care team. "
+    "Be warm and conversational. Speak in plain, natural sentences — no bullet points, no bold or italic text, no special formatting of any kind. "
+    "Keep each response brief and easy to follow on a phone call. "
+    "The member has already been greeted — do not re-introduce yourself or ask if they have time to talk. "
+    "When call context is provided, use it to personalize your responses and guide follow-up questions naturally. "
+    "Avoid asking for information you already have from the member's profile or prior call summaries. "
+    "Ask no more than 3 questions total across the entire call. Once you have collected answers to those questions, "
+    "thank the member warmly by name, let them know the care team will follow up if needed, and wrap up the conversation. "
+    "If at any point the member says they cannot talk, are busy, or says goodbye, immediately acknowledge and wrap up "
+    "warmly — do not continue asking questions."
+)
+
+_PROMPT_FILE = pathlib.Path(__file__).parent / "system_prompt.txt"
+
+def _load_system_prompt() -> str:
+    if _PROMPT_FILE.exists():
+        text = _PROMPT_FILE.read_text().strip()
+        if text:
+            log.info(f"[startup] system prompt loaded from {_PROMPT_FILE} ({len(text)} chars)")
+            return text
+    log.info("[startup] system prompt using hardcoded default")
+    return _DEFAULT_SYSTEM_PROMPT
+
+SYSTEM_PROMPT = _load_system_prompt()
 
 
 def turns_to_messages(turns: list) -> Messages:
