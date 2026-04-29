@@ -88,6 +88,16 @@ MEMORY_STORE_ID = os.environ.get("MEMORY_STORE_ID", "")
 MEMORY_API_KEY = os.environ.get("TWILIO_API_KEY", "")
 MEMORY_API_TOKEN = os.environ.get("TWILIO_API_TOKEN", "")
 
+PHONE_NUMBER = os.environ.get("TWILIO_TAC_PHONE_NUMBER", "")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_TAC_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_TAC_AUTH_TOKEN", "")
+SMS_WRITE_OBSERVATION = os.environ.get("SMS_WRITE_OBSERVATION", "false").lower() == "true"
+OUTBOUND_CALL_TO = os.environ.get("OUTBOUND_CALL_TO", "")
+SMS_SIMULATE_MEMBER_PHONE = os.environ.get("SMS_SIMULATE_MEMBER_PHONE", "")
+
+from twilio.rest import Client as TwilioClient
+twilio_client: Optional[TwilioClient] = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID else None
+
 # AgentCore presigned-URL WebSocket client
 agentcore_client: Optional[AgentCoreRuntimeClient] = None
 if AGENTCORE_RUNTIME_ARN:
@@ -139,7 +149,16 @@ def _fetch_profile_traits(profile_id: str) -> dict:
         data = res.json()
         traits: dict = {}
         for trait_group in (data.get("traits") or []):
-            traits.update(trait_group.get("attributes") or {})
+            if not isinstance(trait_group, dict):
+                continue
+            attrs = trait_group.get("attributes") or {}
+            # attributes may be a dict of {key: value} or a list of {name, value} objects
+            if isinstance(attrs, dict):
+                traits.update(attrs)
+            elif isinstance(attrs, list):
+                for attr in attrs:
+                    if isinstance(attr, dict) and "name" in attr:
+                        traits[attr["name"]] = attr.get("value", "")
         return traits
     except Exception as e:
         logger.warning(f"[memory] fetchProfileTraits failed: {e}")
@@ -203,6 +222,55 @@ def _build_memory_context(memory: Optional[TACMemoryResponse], traits: Optional[
     if not sections:
         return ""
     return "The following is from previous interactions with this member.\n\n" + "\n\n".join(sections)
+
+
+async def _invoke_agentcore_ws(session_id: str, prompt: str, system_prompt: str, context: str) -> str:
+    """Invoke AgentCore via WebSocket (reuses the pooled connection like voice calls)."""
+    agent_ws = await get_or_create_agent_ws(session_id)
+    if not agent_ws:
+        raise RuntimeError("Could not connect to AgentCore")
+
+    await agent_ws.send(json.dumps({
+        "type": "prompt",
+        "voicePrompt": prompt,
+        "systemPrompt": system_prompt,
+        "memoryContext": context,
+    }))
+
+    tokens: list[str] = []
+    async for raw in agent_ws:
+        data = json.loads(raw)
+        if data.get("type") == "text":
+            token = data.get("token", "")
+            if token:
+                tokens.append(token)
+            if data.get("last", False):
+                break
+        elif data.get("type") == "tool_start":
+            logger.info(f"[agentcore] sms tool_start tool={data.get('tool')}")
+        elif data.get("type") == "tool_result":
+            logger.info(f"[agentcore] sms tool_result status={data.get('status')}")
+
+    return "".join(tokens).strip()
+
+
+async def _invoke_agentcore_http(session_id: str, prompt: str, system_prompt: str, context: str) -> str:
+    """Invoke AgentCore via WebSocket (AgentCore only speaks WS, both local and deployed)."""
+    return await _invoke_agentcore_ws(session_id, prompt, system_prompt, context)
+
+
+def _write_sms_observation(profile_id: str, role: str, content: str) -> None:
+    from datetime import datetime
+    obs_content = f"[SMS {role}] {content}"
+    try:
+        requests.post(
+            f"{MEMORY_BASE}/v1/Stores/{MEMORY_STORE_ID}/Profiles/{profile_id}/Observations",
+            json={"observations": [{"content": obs_content, "occurredAt": datetime.utcnow().isoformat() + "Z", "source": "sms-conversation"}]},
+            auth=(MEMORY_API_KEY, MEMORY_API_TOKEN),
+            timeout=5,
+        )
+    except Exception as e:
+        logger.warning(f"[sms] write observation failed: {e}")
 
 
 def _build_system_prompt(name: str, goal: str, goal_desc: str) -> str:
@@ -720,6 +788,63 @@ async def browser_answer_twiml(request: Request) -> Response:
   </Dial>
 </Response>"""
     return Response(content=twiml, media_type="application/xml")
+
+
+@app.post("/sms")
+async def post_sms(request: Request) -> Response:
+    """Handle inbound SMS reply from a member and reply via AgentCore."""
+    form = dict(await request.form())
+    from_phone = form.get("From", "")
+    body = form.get("Body", "").strip()
+    empty_twiml = Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
+    if not body or not from_phone:
+        return empty_twiml
+
+    # Allow simulating a member's SMS conversation using a personal test phone.
+    # When SMS_SIMULATE_MEMBER_PHONE is set and the message comes from OUTBOUND_CALL_TO,
+    # use the member's phone for profile lookup/memory — reply still goes to from_phone.
+    lookup_phone = from_phone
+    if SMS_SIMULATE_MEMBER_PHONE and OUTBOUND_CALL_TO and from_phone == OUTBOUND_CALL_TO:
+        lookup_phone = SMS_SIMULATE_MEMBER_PHONE
+        logger.info(f"[sms] simulating member {lookup_phone} from personal phone {from_phone}")
+
+    loop = asyncio.get_event_loop()
+    profile_id = await loop.run_in_executor(None, _lookup_profile_id, lookup_phone)
+    if not profile_id:
+        logger.warning(f"[sms] no profile for {lookup_phone}")
+        return empty_twiml
+
+    logger.info(f"[sms] inbound from={from_phone} lookup_phone={lookup_phone} profile_id={profile_id} body=\"{body[:80]}\"")
+
+    memory, traits = await _prefetch_memory(lookup_phone)
+    context = _build_memory_context(memory, traits)
+    system_prompt = _build_inbound_system_prompt()
+
+    try:
+        reply = await _invoke_agentcore_http(
+            session_id=profile_id,
+            prompt=body,
+            system_prompt=system_prompt,
+            context=context,
+        )
+    except Exception as e:
+        logger.error(f"[sms] AgentCore invocation failed: {e}")
+        return empty_twiml
+
+    logger.info(f"[sms] reply profile_id={profile_id} reply=\"{reply[:80]}\"")
+
+    if SMS_WRITE_OBSERVATION:
+        await loop.run_in_executor(None, _write_sms_observation, profile_id, "member", body)
+        await loop.run_in_executor(None, _write_sms_observation, profile_id, "agent", reply)
+
+    if twilio_client and PHONE_NUMBER:
+        try:
+            twilio_client.messages.create(to=from_phone, from_=PHONE_NUMBER, body=reply)
+            logger.info(f"[sms] reply sent to={from_phone}")
+        except Exception as e:
+            logger.error(f"[sms] send failed: {e}")
+
+    return empty_twiml
 
 
 @app.get("/health")

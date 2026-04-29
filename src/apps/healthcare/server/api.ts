@@ -213,6 +213,32 @@ export async function startHealthcareAppServer(): Promise<void> {
     }
   });
 
+  // ── Member traits: get + update ─────────────────────────────────────────
+  app.get('/api/member-detail/:profileId/traits', async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    try {
+      const profile = await fetchProfile(profileId);
+      reply.send({ contact: profile?.traits?.Contact ?? {}, outreach: profile?.traits?.outreach ?? {} });
+    } catch (e) {
+      reply.status(500).send({ contact: {}, outreach: {}, error: String(e) });
+    }
+  });
+
+  app.patch('/api/member-detail/:profileId/traits', async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    const { group, key, value } = req.body as { group: string; key: string; value: string };
+    if (!group || !key) return reply.status(400).send({ success: false, error: 'group and key required' });
+    try {
+      const profile = await fetchProfile(profileId);
+      const existing = (profile?.traits?.[group as 'Contact' | 'outreach'] ?? {}) as Record<string, unknown>;
+      await updateProfileTraits(profileId, group, { ...existing, [key]: value });
+      console.log(`[traits] updated profileId=${profileId} ${group}.${key}`);
+      reply.send({ success: true });
+    } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
+  });
+
   // ── Delete observation ───────────────────────────────────────────────────
   app.delete('/api/member-detail/:profileId/observations/:obsId', async (req, reply) => {
     const { profileId, obsId } = req.params as { profileId: string; obsId: string };

@@ -193,6 +193,31 @@
     @keyframes pulse { 0%,100% { box-shadow: 0 0 0 3px rgba(16,185,129,.2); } 50% { box-shadow: 0 0 0 6px rgba(16,185,129,.05); } }
     .live-status { display: flex; align-items: center; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
 
+    /* ── Traits section ─────────────────────────────────────────── */
+    .traits-section { margin-top: 32px; }
+    .traits-section h3 { font-size: 15px; font-weight: 700; margin: 0 0 12px; }
+    .traits-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    @media (max-width: 700px) { .traits-grid { grid-template-columns: 1fr; } }
+    .traits-group { background: var(--white); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; }
+    .traits-group-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin-bottom: 12px; }
+    .trait-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid #f3f4f6; }
+    .trait-row:last-child { border-bottom: none; }
+    .trait-key { font-size: 12px; font-weight: 600; color: #374151; min-width: 140px; flex-shrink: 0; }
+    .trait-input {
+      flex: 1; font-size: 13px; border: 1px solid transparent; border-radius: 5px;
+      padding: 4px 8px; background: transparent; outline: none; color: var(--text);
+      transition: border .15s, background .15s;
+    }
+    .trait-input:hover { border-color: #d1d5db; background: #f9fafb; }
+    .trait-input:focus { border-color: var(--primary); background: #fff; }
+    .trait-save-btn {
+      font-size: 11px; font-weight: 600; padding: 3px 10px; border-radius: 5px;
+      border: none; cursor: pointer; background: var(--primary); color: #fff;
+      opacity: 0; transition: opacity .15s; white-space: nowrap;
+    }
+    .trait-row:focus-within .trait-save-btn { opacity: 1; }
+    .trait-save-btn:hover { background: #c81a2f; }
+
     .btn {
       display: inline-flex; align-items: center; gap: 6px;
       padding: 8px 16px; border-radius: var(--radius);
@@ -264,6 +289,7 @@
   <!-- Tabs -->
   <div class="tabs">
     <div class="tab active" onclick="switchTab('memory', this)">Memory</div>
+    <div class="tab" onclick="switchTab('traits', this)">Traits</div>
     <div class="tab" onclick="switchTab('live', this)">Live Operator Results</div>
   </div>
 
@@ -289,6 +315,22 @@
           <thead><tr><th style="width:50%">Content</th><th>Created At</th><th>Source</th><th></th></tr></thead>
           <tbody id="sumBody"><tr><td colspan="4"><div class="spinner"></div></td></tr></tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab: Member Traits -->
+  <div id="tab-traits" class="tab-panel">
+    <div class="traits-section">
+      <div class="traits-grid">
+        <div class="traits-group">
+          <div class="traits-group-title">Contact</div>
+          <div id="traitsContact"><div class="spinner"></div></div>
+        </div>
+        <div class="traits-group">
+          <div class="traits-group-title">Outreach</div>
+          <div id="traitsOutreach"><div class="spinner"></div></div>
+        </div>
       </div>
     </div>
   </div>
@@ -471,6 +513,65 @@
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     el.classList.add('active');
     document.getElementById(`tab-${name}`).classList.add('active');
+    if (name === 'traits') loadTraits();
+  }
+
+  /* ── Traits ──────────────────────────────────────────────────── */
+  const TRAIT_LABELS = {
+    Contact:  { firstName: 'First Name', lastName: 'Last Name', phone: 'Phone', memberId: 'Member ID' },
+    outreach: { nextFollowUp: 'Next Follow-up', nextFollowUpReason: 'Follow-up Reason', status: 'Status', lastCallSummary: 'Last Call Summary', outreachResponses: 'Outreach Responses' },
+  };
+
+  async function loadTraits() {
+    try {
+      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}/traits`);
+      const data = await res.json();
+      renderTraitGroup('traitsContact',  'Contact',  data.contact  || {});
+      renderTraitGroup('traitsOutreach', 'outreach', data.outreach || {});
+    } catch (e) {
+      document.getElementById('traitsContact').innerHTML  = `<span style="color:var(--text-muted)">Failed to load</span>`;
+      document.getElementById('traitsOutreach').innerHTML = `<span style="color:var(--text-muted)">Failed to load</span>`;
+    }
+  }
+
+  function renderTraitGroup(containerId, group, traits) {
+    const labels = TRAIT_LABELS[group] || {};
+    const keys   = Object.keys(labels);
+    const html   = keys.map(key => {
+      const val   = traits[key] ?? '';
+      const label = labels[key] || key;
+      return `<div class="trait-row">
+        <span class="trait-key">${escHtml(label)}</span>
+        <input class="trait-input" data-group="${escHtml(group)}" data-key="${escHtml(key)}"
+          value="${escHtml(String(val))}" placeholder="—"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();this.nextElementSibling.click()}"
+        />
+        <button class="trait-save-btn" onclick="saveTrait(this)">Save</button>
+      </div>`;
+    }).join('');
+    document.getElementById(containerId).innerHTML = html || '<span style="color:var(--text-muted);font-size:13px">No traits</span>';
+  }
+
+  async function saveTrait(btn) {
+    const input = btn.previousElementSibling;
+    const group = input.dataset.group;
+    const key   = input.dataset.key;
+    const value = input.value;
+    btn.disabled = true; btn.textContent = '…';
+    try {
+      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}/traits`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group, key, value }),
+      });
+      const data = await res.json();
+      if (data.success) { showToast(`${key} updated`, 'success'); input.blur(); }
+      else showToast(`Update failed: ${data.error}`, 'error');
+    } catch (e) {
+      showToast(`Update failed: ${e.message}`, 'error');
+    } finally {
+      btn.disabled = false; btn.textContent = 'Save';
+    }
   }
 
   /* ── AI Agent Call ──────────────────────────────────────────── */

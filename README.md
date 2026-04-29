@@ -251,6 +251,23 @@ cp .env.example .env
 
 **ngrok always exposes port 8000 regardless of which backend you use.** The TAC server is the single Twilio-facing gateway.
 
+### Quick start (3 terminals)
+
+```bash
+# Terminal 1 — ngrok
+ngrok http 8000
+
+# Terminal 2 — Python TAC server (port 8000)
+cd src/tac && source .venv/bin/activate && uvicorn server:app --port 8000 --reload
+
+# Terminal 3 — Node.js app server (port 8001)
+npm run dev
+```
+
+Open the dashboard at **http://localhost:8001/members.html**
+
+---
+
 ### 1. Expose the TAC server with ngrok
 
 Twilio needs a public HTTPS URL for TwiML and the WebSocket. In a dedicated terminal:
