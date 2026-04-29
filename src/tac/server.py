@@ -12,6 +12,7 @@ Endpoints:
   POST /conversation-relay-callback — Call-end webhook
   POST /set-outbound-context        — IPC: Node.js app server stores pending ctx before dial
   GET  /get-outbound-phone/{conv_id} — IPC: Node.js CI webhook looks up member phone
+  POST /escalate-call               — IPC: Transfer active call to Flex human agent queue
   GET  /health                      — Health check
 """
 
@@ -39,6 +40,8 @@ from typing import Optional
 
 import requests
 import websockets
+from base64 import b64encode
+from xml.sax.saxutils import escape
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import Response
@@ -95,6 +98,14 @@ SMS_WRITE_OBSERVATION = os.environ.get("SMS_WRITE_OBSERVATION", "false").lower()
 OUTBOUND_CALL_TO = os.environ.get("OUTBOUND_CALL_TO", "")
 SMS_SIMULATE_MEMBER_PHONE = os.environ.get("SMS_SIMULATE_MEMBER_PHONE", "")
 
+ESCALATION_ENABLED = os.environ.get("ESCALATION_ENABLED", "false").lower() in ("1", "true", "yes")
+FLEX_HANDOFF_APPLICATION_SID = os.environ.get("TWILIO_FLEX_HANDOFF_APPLICATION_SID", "")
+FLEX_DEFAULT_QUEUE = os.environ.get("TWILIO_FLEX_DEFAULT_QUEUE", "healthcare")
+FLEX_ESCALATION_ANNOUNCEMENT = os.environ.get(
+    "TWILIO_FLEX_ESCALATION_ANNOUNCEMENT",
+    "Of course! Let me connect you with one of our care specialists right away. Please hold for just a moment.",
+)
+
 from twilio.rest import Client as TwilioClient
 twilio_client: Optional[TwilioClient] = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID else None
 
@@ -115,9 +126,72 @@ tac = TAC(config=TACConfig.from_env())
 agent_connections: dict[str, websockets.ClientConnection] = {}
 pending_outbound_context: dict[str, dict] = {}
 outbound_conversation_map: dict[str, str] = {}
+conversation_call_sid_map: dict[str, str] = {}
+pending_call_sid_map: dict[str, str] = {}
 system_prompt_cache: dict[str, str] = {}
 greeting_cache: dict[str, str] = {}
 memory_context_cache: dict[str, str] = {}
+
+# ---------------------------------------------------------------------------
+# Escalation helpers
+# ---------------------------------------------------------------------------
+
+def _twilio_basic_auth_header() -> dict[str, str]:
+    creds = f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode("utf-8")
+    return {"Authorization": f"Basic {b64encode(creds).decode('ascii')}"}
+
+
+def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_queue: str) -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response>"
+        '<Dial answerOnBridge="true">'
+        '<Application copyParentTo="true">'
+        f"<ApplicationSid>{escape(FLEX_HANDOFF_APPLICATION_SID)}</ApplicationSid>"
+        f'<Parameter name="reason" value="{escape(reason)}" />'
+        "</Application>"
+        "</Dial>"
+        "</Response>"
+    )
+
+
+async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target_queue: str) -> bool:
+    if not ESCALATION_ENABLED:
+        logger.info(f"[escalation] disabled; skipping conv_id={conv_id}")
+        return False
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        logger.error(f"[escalation] missing Twilio account credentials conv_id={conv_id}")
+        return False
+    if not FLEX_HANDOFF_APPLICATION_SID:
+        logger.error(f"[escalation] missing TWILIO_FLEX_HANDOFF_APPLICATION_SID conv_id={conv_id}")
+        return False
+
+    call_sid = conversation_call_sid_map.get(conv_id)
+    if not call_sid:
+        logger.error(f"[escalation] no call_sid mapped for conv_id={conv_id}")
+        return False
+
+    twiml = _build_flex_transfer_twiml(conv_id, reason, urgency, target_queue)
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls/{call_sid}.json"
+    headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
+    payload = {"Twiml": twiml}
+
+    loop = asyncio.get_event_loop()
+
+    def _do_request() -> requests.Response:
+        return requests.post(url, data=payload, headers=headers, timeout=10)
+
+    try:
+        res = await loop.run_in_executor(None, _do_request)
+        if res.status_code >= 300:
+            logger.error(f"[escalation] Twilio update failed status={res.status_code} conv_id={conv_id} body={res.text[:500]}")
+            return False
+        logger.info(f"[escalation] transferred conv_id={conv_id} call_sid={call_sid} reason={reason} urgency={urgency} queue={target_queue or FLEX_DEFAULT_QUEUE}")
+        return True
+    except Exception as e:
+        logger.error(f"[escalation] transfer exception conv_id={conv_id}: {e}", exc_info=True)
+        return False
+
 
 # ---------------------------------------------------------------------------
 # TAC Memory helpers
@@ -381,6 +455,15 @@ class OwlVoiceChannel(VoiceChannel):
             pending_outbound_context[conv_id] = pending_outbound_context.pop(outbound_conv_id)
             logger.info(f"[setup] mapped outboundConvId={outbound_conv_id} → maestroConvId={conv_id}")
 
+        # Track call_sid for escalation — Twilio passes it via customParameters or pending map
+        call_sid = extra.get("callSid", "")
+        if call_sid:
+            conversation_call_sid_map[conv_id] = call_sid
+        elif outbound_conv_id and outbound_conv_id in pending_call_sid_map:
+            conversation_call_sid_map[conv_id] = pending_call_sid_map.pop(outbound_conv_id)
+        if conv_id in conversation_call_sid_map:
+            logger.info(f"[setup] call_sid mapped conv_id={conv_id} call_sid={conversation_call_sid_map[conv_id]}")
+
         # Populate outbound_conversation_map immediately at call setup so the CI
         # webhook can find the member phone even if the caller hangs up before speaking.
         ctx = pending_outbound_context.get(conv_id)
@@ -506,6 +589,20 @@ async def handle_message_ready(
                             yield token
                         if data.get("last", False):
                             break
+                    elif msg_type == "escalate":
+                        reason = str(data.get("reason", "member_requested_human"))
+                        urgency = str(data.get("urgency", "normal"))
+                        target_queue = str(data.get("targetQueue", FLEX_DEFAULT_QUEUE))
+                        logger.info(f"[escalation] agent requested transfer conv_id={conv_id} reason={reason} urgency={urgency}")
+                        escalated = await _escalate_call_to_flex(
+                            conv_id=conv_id,
+                            reason=reason,
+                            urgency=urgency,
+                            target_queue=target_queue,
+                        )
+                        if not escalated:
+                            yield " Unfortunately I wasn't able to complete the transfer. Please try again."
+                        break
                     elif msg_type == "tool_start":
                         logger.info(f"[agentcore] tool_start tool={data.get('tool')}")
                     elif msg_type == "tool_result":
@@ -543,6 +640,7 @@ async def handle_conversation_ended(context: ConversationSession) -> None:
     system_prompt_cache.pop(conv_id, None)
     greeting_cache.pop(conv_id, None)
     memory_context_cache.pop(conv_id, None)
+    conversation_call_sid_map.pop(conv_id, None)
     # outbound_conversation_map entry stays until CI webhook consumes it
     logger.info(f"[healthcare] cleaned up conv_id={conv_id}")
 
@@ -625,6 +723,10 @@ async def post_twiml_outbound(request: Request) -> Response:
     # agentcore — ConversationRelay
     greeting = ctx.get("greeting", "") if ctx else "Hello! This is the Owl Health Care Team."
     form = {k: str(v) for k, v in (await request.form()).items()}
+    call_sid = form.get("CallSid", "")
+    # Cache call_sid now so _handle_setup can map it to the Maestro conv_id
+    if conv_id and call_sid:
+        pending_call_sid_map[conv_id] = call_sid
     ws_url, callback_url = _get_urls(request)
     # For outbound calls swap From/To so TAC labels the member (To) as CUSTOMER.
     # This ensures memory extraction writes summaries to the member's profile,
@@ -639,9 +741,12 @@ async def post_twiml_outbound(request: Request) -> Response:
             "websocket_url": ws_url,
             "action_url": callback_url,
             "welcome_greeting": greeting,
-            "custom_parameters": {"outboundConvId": conv_id} if conv_id else {},
+            "custom_parameters": {
+                "outboundConvId": conv_id,
+                "callSid": call_sid,
+            } if conv_id else {"callSid": call_sid},
         },
-        call_sid=form.get("CallSid", ""),
+        call_sid=call_sid,
     )
     return Response(content=twiml, media_type="application/xml")
 
@@ -845,6 +950,36 @@ async def post_sms(request: Request) -> Response:
             logger.error(f"[sms] send failed: {e}")
 
     return empty_twiml
+
+
+@app.post("/escalate-call")
+async def escalate_call_endpoint(request: Request) -> dict:
+    """Care-team-initiated escalation. Accepts conv_id or profile_id."""
+    body = await request.json()
+    conv_id = body.get("conv_id", "")
+    profile_id = body.get("profile_id", "")
+    reason = body.get("reason", "care_team_requested")
+
+    # Resolve conv_id from profile_id via reverse-lookup on outbound_conversation_map
+    if not conv_id and profile_id:
+        for cid, entry in outbound_conversation_map.items():
+            pid = entry.get("profileId", "") if isinstance(entry, dict) else ""
+            if pid == profile_id:
+                conv_id = cid
+                break
+
+    # Also check system_prompt_cache (all active conversations) as fallback
+    if not conv_id and profile_id:
+        for cid in list(system_prompt_cache.keys()):
+            if conversation_call_sid_map.get(cid):
+                conv_id = cid
+                break
+
+    if not conv_id:
+        return {"success": False, "error": "No active call found for this member"}
+
+    success = await _escalate_call_to_flex(conv_id, reason, "normal", FLEX_DEFAULT_QUEUE)
+    return {"success": success}
 
 
 @app.get("/health")

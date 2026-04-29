@@ -332,6 +332,22 @@ export async function startHealthcareAppServer(): Promise<void> {
   });
 
 
+  // ── Escalation ────────────────────────────────────────────────────────────
+  app.post('/api/escalate-call', async (req, reply) => {
+    const { profileId, reason = 'care_team_requested' } = req.body as Record<string, string>;
+    try {
+      const res = await fetch(`http://localhost:${TAC_PORT}/escalate-call`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ profile_id: profileId, reason }),
+      });
+      reply.send(await res.json());
+    } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
+  });
+
+
   // ── Admin: system prompt ─────────────────────────────────────────────────
   const SYSTEM_PROMPT_FILE          = path.join(process.cwd(), 'src/apps/healthcare/agent/src/system_prompt.txt');
   const SYSTEM_PROMPT_INBOUND_FILE  = path.join(process.cwd(), 'src/tac/system_prompt_inbound.txt');

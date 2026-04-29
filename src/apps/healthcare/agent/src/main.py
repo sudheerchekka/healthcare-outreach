@@ -19,7 +19,7 @@ import asyncio
 import json
 import os
 import pathlib
-from strands import Agent
+from strands import Agent, tool
 from strands.types.content import Messages
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from bedrock_agentcore.memory import MemorySessionManager
@@ -59,6 +59,24 @@ def _load_system_prompt() -> str:
     return _DEFAULT_SYSTEM_PROMPT
 
 SYSTEM_PROMPT = _load_system_prompt()
+
+escalation_state: dict = {}
+
+
+@tool
+def escalate_to_human(reason: str = "member_requested_human", urgency: str = "normal") -> str:
+    """Transfer the member to a human care specialist.
+
+    Call this after acknowledging the member's request in your response.
+    reason: 'member_requested_human' when they ask to speak to a person,
+            'safety_risk' for distress/emergency situations.
+    urgency: 'normal' or 'high' (use high for safety risks).
+    """
+    escalation_state["triggered"] = True
+    escalation_state["reason"] = reason
+    escalation_state["urgency"] = urgency
+    log.info(f"[escalation] escalate_to_human called reason={reason} urgency={urgency}")
+    return json.dumps({"escalate": True, "reason": reason, "urgency": urgency})
 
 
 def turns_to_messages(turns: list) -> Messages:
@@ -234,6 +252,21 @@ async def handle_voice_websocket(websocket, request_context=None):
             log.info("[ws] stream cancelled (interrupt)")
             raise
         finally:
+            # Send escalate signal before sentinel if tool was triggered
+            if escalation_state.get("triggered"):
+                esc_reason = escalation_state.get("reason", "member_requested_human")
+                esc_urgency = escalation_state.get("urgency", "normal")
+                escalation_state.clear()
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "escalate",
+                        "reason": esc_reason,
+                        "urgency": esc_urgency,
+                        "targetQueue": "default",
+                    }))
+                    log.info(f"[escalation] signal sent reason={esc_reason} urgency={esc_urgency}")
+                except Exception as e:
+                    log.warning(f"[escalation] signal send failed: {e}")
             try:
                 await websocket.send_text(json.dumps({"type": "text", "token": "", "last": True}))
             except Exception as e:
@@ -259,7 +292,7 @@ async def handle_voice_websocket(websocket, request_context=None):
                 if agent is None:
                     base_system = SYSTEM_PROMPT
                     effective_system = f"{base_system}\n\n{system_prompt}" if system_prompt else base_system
-                    agent = Agent(model=load_model(), system_prompt=effective_system)
+                    agent = Agent(model=load_model(), system_prompt=effective_system, tools=[escalate_to_human])
                     log.info(f"[ws] agent created system_prompt_len={len(effective_system)}")
 
                 input_text = (
