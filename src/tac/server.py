@@ -141,14 +141,24 @@ def _twilio_basic_auth_header() -> dict[str, str]:
     return {"Authorization": f"Basic {b64encode(creds).decode('ascii')}"}
 
 
-def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_queue: str) -> str:
+def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_queue: str,
+                               member_phone: str = "", member_name: str = "", member_profile_id: str = "") -> str:
+    params = f'<Parameter name="reason" value="{escape(reason)}" />'
+    if member_phone:
+        params += f'<Parameter name="memberPhone" value="{escape(member_phone)}" />'
+    if member_name:
+        params += f'<Parameter name="memberName" value="{escape(member_name)}" />'
+    if member_profile_id:
+        params += f'<Parameter name="memberProfileId" value="{escape(member_profile_id)}" />'
+    if urgency == "high":
+        params += '<Parameter name="urgency" value="high" />'
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
         '<Dial answerOnBridge="true">'
         '<Application copyParentTo="true">'
         f"<ApplicationSid>{escape(FLEX_HANDOFF_APPLICATION_SID)}</ApplicationSid>"
-        f'<Parameter name="reason" value="{escape(reason)}" />'
+        + params +
         "</Application>"
         "</Dial>"
         "</Response>"
@@ -156,22 +166,50 @@ def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_q
 
 
 async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target_queue: str) -> bool:
+    logger.info(f"[escalation] attempt conv_id={conv_id} reason={reason} urgency={urgency} queue={target_queue} enabled={ESCALATION_ENABLED} app_sid={FLEX_HANDOFF_APPLICATION_SID or '(not set)'}")
     if not ESCALATION_ENABLED:
-        logger.info(f"[escalation] disabled; skipping conv_id={conv_id}")
+        logger.warning(f"[escalation] ESCALATION_ENABLED=false — set to true in .env and restart")
         return False
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-        logger.error(f"[escalation] missing Twilio account credentials conv_id={conv_id}")
+        logger.error(f"[escalation] missing TWILIO_TAC_ACCOUNT_SID or TWILIO_TAC_AUTH_TOKEN")
         return False
     if not FLEX_HANDOFF_APPLICATION_SID:
-        logger.error(f"[escalation] missing TWILIO_FLEX_HANDOFF_APPLICATION_SID conv_id={conv_id}")
+        logger.error(f"[escalation] missing TWILIO_FLEX_HANDOFF_APPLICATION_SID")
         return False
 
     call_sid = conversation_call_sid_map.get(conv_id)
+    logger.info(f"[escalation] call_sid={call_sid or '(not mapped)'} conversation_call_sid_map keys={list(conversation_call_sid_map.keys())}")
     if not call_sid:
-        logger.error(f"[escalation] no call_sid mapped for conv_id={conv_id}")
+        logger.error(f"[escalation] no call_sid for conv_id={conv_id} — call may not have populated pending_call_sid_map")
         return False
 
-    twiml = _build_flex_transfer_twiml(conv_id, reason, urgency, target_queue)
+    # Resolve actual member identity — needed when OUTBOUND_CALL_TO redirects to a demo phone
+    map_entry = outbound_conversation_map.get(conv_id)
+    logger.info(f"[escalation] outbound_conversation_map[{conv_id}] = {map_entry!r}")
+    logger.info(f"[escalation] outbound_conversation_map full = {dict(outbound_conversation_map)!r}")
+    member_phone = ""
+    member_profile_id = ""
+    member_name = ""
+    if isinstance(map_entry, dict):
+        member_phone = map_entry.get("phone", "")
+        member_profile_id = map_entry.get("profileId", "")
+        member_name = map_entry.get("name", "")
+    elif isinstance(map_entry, str):
+        member_phone = map_entry
+    # Fallback: pending_outbound_context may still have context if turn 1 hasn't run
+    ctx = pending_outbound_context.get(conv_id)
+    if ctx:
+        if not member_name:
+            member_name = ctx.get("name", "")
+        if not member_phone:
+            member_phone = ctx.get("phone", "")
+    logger.info(f"[escalation] resolved member_phone={member_phone or '(unknown)'} member_name={member_name or '(unknown)'} member_profile_id={member_profile_id or '(unknown)'}")
+
+    twiml = _build_flex_transfer_twiml(conv_id, reason, urgency, target_queue,
+                                       member_phone=member_phone,
+                                       member_name=member_name,
+                                       member_profile_id=member_profile_id)
+    logger.info(f"[escalation] TwiML: {twiml}")
     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls/{call_sid}.json"
     headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
     payload = {"Twiml": twiml}
@@ -183,10 +221,11 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
 
     try:
         res = await loop.run_in_executor(None, _do_request)
+        logger.info(f"[escalation] Twilio API response status={res.status_code} body={res.text[:500]}")
         if res.status_code >= 300:
-            logger.error(f"[escalation] Twilio update failed status={res.status_code} conv_id={conv_id} body={res.text[:500]}")
+            logger.error(f"[escalation] Twilio update failed status={res.status_code} conv_id={conv_id}")
             return False
-        logger.info(f"[escalation] transferred conv_id={conv_id} call_sid={call_sid} reason={reason} urgency={urgency} queue={target_queue or FLEX_DEFAULT_QUEUE}")
+        logger.info(f"[escalation] ✓ transferred conv_id={conv_id} call_sid={call_sid} reason={reason} urgency={urgency} queue={target_queue or FLEX_DEFAULT_QUEUE}")
         return True
     except Exception as e:
         logger.error(f"[escalation] transfer exception conv_id={conv_id}: {e}", exc_info=True)
@@ -521,9 +560,15 @@ async def handle_message_ready(
             # Outbound call
             system_prompt_cache[conv_id] = _build_system_prompt(ctx["name"], ctx["goal"], ctx["goalDesc"])
             greeting_cache[conv_id] = ctx.get("greeting", "")
-            outbound_conversation_map[conv_id] = ctx["phone"]
             phone = ctx["phone"]
-            logger.info(f"[healthcare] outbound ctx applied conv_id={conv_id} member={ctx['name']}")
+            # Preserve/update the dict entry set by _handle_setup (keeps profileId and real member phone).
+            # If _handle_setup already wrote a dict, merge name in; otherwise write fresh.
+            existing = outbound_conversation_map.get(conv_id)
+            if isinstance(existing, dict):
+                existing["name"] = ctx.get("name", "")
+            else:
+                outbound_conversation_map[conv_id] = {"phone": phone, "profileId": "", "name": ctx.get("name", "")}
+            logger.info(f"[healthcare] outbound ctx applied conv_id={conv_id} member={ctx['name']} map={outbound_conversation_map.get(conv_id)}")
         else:
             # Inbound call — fetch memory using caller's address if available
             system_prompt_cache[conv_id] = _build_inbound_system_prompt()
