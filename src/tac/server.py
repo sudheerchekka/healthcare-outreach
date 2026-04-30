@@ -297,12 +297,14 @@ def _fetch_memory(profile_id: str) -> Optional[TACMemoryResponse]:
         return None
 
 
-async def _prefetch_memory(phone: str) -> tuple[Optional[TACMemoryResponse], dict]:
-    """Run blocking memory + traits fetch in thread pool. Returns (memory, traits)."""
+async def _prefetch_memory(phone: str, profile_id: Optional[str] = None) -> tuple[Optional[TACMemoryResponse], dict]:
+    """Run blocking memory + traits fetch in thread pool. Returns (memory, traits).
+    Pass profile_id to skip the lookup when it's already known."""
     loop = asyncio.get_event_loop()
     t0 = time.time()
     try:
-        profile_id = await loop.run_in_executor(None, _lookup_profile_id, phone)
+        if not profile_id:
+            profile_id = await loop.run_in_executor(None, _lookup_profile_id, phone)
         if profile_id:
             memory, traits = await asyncio.gather(
                 loop.run_in_executor(None, _fetch_memory, profile_id),
@@ -1022,7 +1024,13 @@ async def post_sms(request: Request) -> Response:
 
     logger.info(f"[sms] inbound from={from_phone} lookup_phone={lookup_phone} profile_id={profile_id} body=\"{body[:80]}\"")
 
-    memory, traits = await _prefetch_memory(lookup_phone)
+    # Parallel: warm AgentCore WS connection while fetching memory (skip duplicate lookup)
+    t0 = time.time()
+    memory_task = asyncio.create_task(_prefetch_memory(lookup_phone, profile_id=profile_id))
+    ws_task = asyncio.create_task(get_or_create_agent_ws(profile_id))
+    memory, traits = await memory_task
+    logger.info(f"[sms] memory+ws parallel fetch in {(time.time()-t0)*1000:.0f}ms")
+
     context = _build_memory_context(memory, traits)
     system_prompt = _build_inbound_system_prompt()
 
@@ -1039,16 +1047,17 @@ async def post_sms(request: Request) -> Response:
 
     logger.info(f"[sms] reply profile_id={profile_id} reply=\"{reply[:80]}\"")
 
-    if SMS_WRITE_OBSERVATION:
-        await loop.run_in_executor(None, _write_sms_observation, profile_id, "member", body)
-        await loop.run_in_executor(None, _write_sms_observation, profile_id, "agent", reply)
-
     if twilio_client and PHONE_NUMBER:
         try:
             twilio_client.messages.create(to=from_phone, from_=PHONE_NUMBER, body=reply)
             logger.info(f"[sms] reply sent to={from_phone}")
         except Exception as e:
             logger.error(f"[sms] send failed: {e}")
+
+    # Write observations after sending reply so they don't delay the member response
+    if SMS_WRITE_OBSERVATION:
+        loop.run_in_executor(None, _write_sms_observation, profile_id, "member", body)
+        loop.run_in_executor(None, _write_sms_observation, profile_id, "agent", reply)
 
     return empty_twiml
 
