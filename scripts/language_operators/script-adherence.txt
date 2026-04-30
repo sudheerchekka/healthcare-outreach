@@ -1,0 +1,19 @@
+[Category: Greetings]  
+Goal: introduce yourself and greet the end user
+
+[Category: Verification] 
+Goal: Confirm identity quickly
+Action: Capture first and last name of the customer within first 50 seconds of conversation.
+
+[Category: Complaint Handling] 
+Goal: Acknowledge emotion; gather specifics; set path to resolution 
+Action: Capture the details of the complaint 
+
+[Category: Competitor Handling]
+Goal: Acknowledge competitor; clarify priority; position value or offer
+Action: Acknowledge competitor
+Score weight: 20% 
+
+[Category: Wrap Up] 
+Goal: Recap, confirm next steps, close 
+Action: Recap actions taken and use the customer's name while closing out.

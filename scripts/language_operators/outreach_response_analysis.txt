@@ -1,0 +1,44 @@
+prompt: 
+    Analyze the conversation and provide a list of questions asked by the agent and the corresponding answer by the end user in a json format which can be consume programmatically
+
+JSON:
+    {
+  "properties": {
+    "interactions": {
+      "items": {
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+
+Training example:
+    example conversation:
+        Agent: Is your appointment on the calendar
+        End user: Yes, I have it on my calendar
+        Agent: Are you taking your metamorphin
+        End USer: I am taking twice a day
+
+    Expected output results:
+        {
+  "interactions": [
+    {
+      "question": "Did the patient confirm their appointment",
+      "answer": "Yes"
+    },
+    {
+      "question": "Is the patient taking their metamorphin?",
+      "answer": "2 times a day"
+    }
+  ]
+}
