@@ -614,7 +614,7 @@ export async function startHealthcareAppServer(): Promise<void> {
       // ── Outreach response analysis operator ───────────────────────────────
       if (isOutreachOp && !outreachAnalysis) {
         console.log(`[CI] outreach resultField keys: ${Object.keys(resultField ?? {}).join(', ')}`);
-        let parsed: { interactions?: { question: string; answer: string }[] } | null = null;
+        let parsed: { interactions?: { question: string; answer: string; flag?: string }[] } | null = null;
         if (Array.isArray((resultField as Record<string, unknown> | undefined)?.interactions)) {
           parsed = resultField as unknown as typeof parsed;
         } else {
@@ -630,9 +630,7 @@ export async function startHealthcareAppServer(): Promise<void> {
         const interactions = parsed?.interactions ?? [];
         console.log(`[CI] outreach interactions count=${interactions.length}`);
         if (interactions.length > 0) {
-          outreachAnalysis = 'Outreach Analysis\n' + interactions
-            .map(i => `Q: ${i.question}\nA: ${i.answer}`)
-            .join('\n\n');
+          outreachAnalysis = JSON.stringify(interactions);
         }
       }
     }

@@ -221,7 +221,11 @@
     .summary-text   { font-size: 11px; color: var(--text); line-height: 1.5; white-space: pre-line; }
     .summary-empty  { color: var(--text-muted); font-size: 11px; font-style: italic; }
     .responses-cell { width: 280px; }
-    .responses-text { font-size: 11px; color: var(--text); line-height: 1.6; white-space: pre-line; }
+    .responses-text { font-size: 11px; color: var(--text); line-height: 1.6; }
+    .response-item  { margin-bottom: 6px; }
+    .response-item.flagged { color: #dc2626; }
+    .response-q { font-weight: 600; }
+    .response-a { margin-left: 8px; }
 
     /* ── Action buttons ─────────────────────────────────────────── */
     .actions { display: flex; flex-direction: column; gap: 6px; width: 90px; }
@@ -452,6 +456,24 @@
     return { text: text.trim(), ts: '' };
   }
 
+  function renderOutreach(raw) {
+    if (!raw) return '<span class="summary-empty">—</span>';
+    try {
+      const interactions = JSON.parse(raw);
+      if (!Array.isArray(interactions)) throw new Error();
+      return '<div class="responses-text">' + interactions.map(i => {
+        const flagged = String(i.flag).toLowerCase() === 'yes';
+        return `<div class="response-item${flagged ? ' flagged' : ''}">
+          <div class="response-q">Q: ${i.question}</div>
+          <div class="response-a">A: ${i.answer}</div>
+        </div>`;
+      }).join('') + '</div>';
+    } catch {
+      // fallback: plain text (legacy format)
+      return `<div class="responses-text">${raw}</div>`;
+    }
+  }
+
   /* ── Load members from API ───────────────────────────────────── */
   async function resetConversations() {
     const btn = document.getElementById('resetBtn');
@@ -552,7 +574,7 @@
       const idx = members.indexOf(m);
       const status = m.status || 'pending';
       const { text: summaryText, ts: summaryTs } = stripPrefix(m.last_call_summary || '');
-      const { text: responsesText, ts: responsesTs } = stripPrefix(m.outreach_responses || '');
+      const { text: responsesRaw, ts: responsesTs } = stripPrefix(m.outreach_responses || '');
       const callTs = summaryTs || responsesTs;
       return `
       <tr>
@@ -584,9 +606,7 @@
           ${callTs ? `<div class="status-ts">${callTs}</div>` : ''}
         </td>
         <td class="responses-cell">
-          ${responsesText
-            ? `<div class="responses-text">${responsesText}</div>`
-            : '<span class="summary-empty">—</span>'}
+          ${renderOutreach(responsesRaw)}
         </td>
         <td class="summary-cell">
           ${summaryText
