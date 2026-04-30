@@ -297,7 +297,7 @@
   <div class="tabs">
     <div class="tab active" onclick="switchTab('memory', this)">Memory</div>
     <div class="tab" onclick="switchTab('traits', this)">Traits</div>
-    <div class="tab" onclick="switchTab('live', this)">Live Operator Results</div>
+    <div class="tab" onclick="switchTab('live', this)">Operator Results</div>
   </div>
 
   <!-- Tab: Memory (observations + summaries) -->
@@ -594,6 +594,7 @@
         body: JSON.stringify({
           name: memberData.name, phone: memberData.phone,
           goal: memberData.next_follow_up, goalDesc: memberData.next_follow_up_reason,
+          profileId,
         }),
       });
       const data = await res.json();

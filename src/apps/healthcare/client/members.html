@@ -397,6 +397,10 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         Refresh
       </button>
+      <button class="btn-refresh" id="resetBtn" onclick="resetConversations()" title="Close all open Maestro conversations for the demo phone (fixes 409 conflict errors)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+        Reset Sessions
+      </button>
     </div>
   </div>
 
@@ -448,6 +452,30 @@
   }
 
   /* ── Load members from API ───────────────────────────────────── */
+  async function resetConversations() {
+    const btn = document.getElementById('resetBtn');
+    btn.disabled = true;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg> Resetting…`;
+    try {
+      const res = await fetch('http://localhost:8001/api/reset-conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast(`Reset: closed ${data.closed} conversation(s) for ${data.phone}`, 'success');
+      } else {
+        showToast(`Reset failed: ${data.error}`, 'error');
+      }
+    } catch (e) {
+      showToast('Could not reach app server.', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg> Reset Sessions`;
+    }
+  }
+
   async function loadMembers() {
     const btn = document.getElementById('refreshBtn');
     btn.classList.add('spinning');
@@ -697,6 +725,10 @@
       label: 'Follow-up outreach',
       body: (m) => `Hi ${m.name}, this is the Owl Health Care Team reaching out about: ${m.next_follow_up || 'your care plan'}. ${m.next_follow_up_reason || ''} Please reply or call us if you have any questions.`.trim(),
     },
+    chant: {
+      label: 'CHANT program invite',
+      body: (m) => `Hi ${m.name}, this is the Owl Health Care Team reaching out to invite you to our CHANT program for new mothers. You can find more details here: https://www.tn.gov/health/chant.html. Please reply or call us if you have any questions.`,
+    },
   };
 
   let smsMember = null;
@@ -813,6 +845,7 @@
       <option value="followup">Follow-up outreach</option>
       <option value="appointment">Appointment notification</option>
       <option value="claim">Claim status update</option>
+      <option value="chant">CHANT program invite</option>
       <option value="custom">Custom message</option>
     </select>
     <label for="smsBody">Message</label>

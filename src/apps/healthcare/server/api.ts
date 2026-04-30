@@ -138,7 +138,7 @@ export async function startHealthcareAppServer(): Promise<void> {
 
   // ── Outbound call ────────────────────────────────────────────────────────
   app.post('/api/outbound-call', async (req, reply) => {
-    const { name = 'Member', phone = '', goal = '', goalDesc = '' } = req.body as Record<string, string>;
+    const { name = 'Member', phone = '', goal = '', goalDesc = '', profileId = '' } = req.body as Record<string, string>;
     const memberPhone = normalizePhone(phone);
     const dialTo = OUTBOUND_CALL_TO || memberPhone;
     const greeting = buildGreeting(name, goal, goalDesc);
@@ -148,6 +148,11 @@ export async function startHealthcareAppServer(): Promise<void> {
     // The actual Maestro conversationId won't be known until after the call connects,
     // so we pass conv_id as a query param on the twiml-outbound URL and the Python
     // server reads it from the query string to look up pending context.
+    if (profileId) {
+      ciLiveResults.delete(profileId);
+      console.log(`[outbound-call] cleared CI results for profileId=${profileId}`);
+    }
+
     const convId = `outbound-${memberPhone}-${Date.now()}`;
     const ctx: OutboundContext & { conv_id: string } = { conv_id: convId, name, goal, goalDesc, phone: memberPhone, greeting };
 
@@ -285,14 +290,18 @@ export async function startHealthcareAppServer(): Promise<void> {
     raw.setHeader('Access-Control-Allow-Origin', '*');
     raw.flushHeaders();
 
-    // Clear stored results so page always starts fresh on reload
-    ciLiveResults.delete(profileId);
-    const snapshot = { operators: CI_OPERATORS, results: {} };
+    // Send cached results immediately if available, otherwise send empty snapshot
+    const cached = ciLiveResults.get(profileId) ?? {};
+    const snapshot = { operators: CI_OPERATORS, results: cached };
     raw.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+    if (Object.keys(cached).length > 0) {
+      console.log(`[SSE] sent cached results to new subscriber profileId=${profileId} ops=${Object.keys(cached).join(',')}`);
+    }
 
     // Register subscriber
     if (!ciSseClients.has(profileId)) ciSseClients.set(profileId, new Set());
     ciSseClients.get(profileId)!.add(raw);
+    console.log(`[SSE] subscriber registered profileId=${profileId} total=${ciSseClients.get(profileId)!.size} allKeys=${JSON.stringify([...ciSseClients.keys()])}`);
 
     // Keepalive ping every 25s
     const ping = setInterval(() => raw.write(': ping\n\n'), 25000);
@@ -300,6 +309,7 @@ export async function startHealthcareAppServer(): Promise<void> {
     req.raw.on('close', () => {
       clearInterval(ping);
       ciSseClients.get(profileId)?.delete(raw);
+      console.log(`[SSE] subscriber disconnected profileId=${profileId} remaining=${ciSseClients.get(profileId)?.size ?? 0}`);
     });
   });
 
@@ -327,6 +337,36 @@ export async function startHealthcareAppServer(): Promise<void> {
       console.log(`[browser-call] placed callSid=${call.sid} to=${dialTo}`);
       reply.send({ success: true, call_sid: call.sid });
     } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
+  });
+
+
+  // ── Reset: close all open Maestro conversations for a phone number ──────────
+  app.post('/api/reset-conversations', async (req, reply) => {
+    const { phone } = req.body as { phone?: string };
+    const target = phone || OUTBOUND_CALL_TO;
+    if (!target) {
+      return reply.status(400).send({ success: false, error: 'phone required (or set OUTBOUND_CALL_TO)' });
+    }
+    try {
+      // List active/inactive conversations for this participant
+      const conversations = await twilioClient.conversations.v1.participantConversations.list({
+        address: target,
+      });
+      const open = conversations.filter(c => c.conversationState !== 'closed');
+      console.log(`[reset] found ${open.length} open conversation(s) for ${target}`);
+      const results = await Promise.allSettled(
+        open.map(c =>
+          twilioClient.conversations.v1.conversations(c.conversationSid).update({ state: 'closed' })
+        )
+      );
+      const closed = results.filter(r => r.status === 'fulfilled').length;
+      const failed = results.filter(r => r.status === 'rejected').length;
+      console.log(`[reset] closed=${closed} failed=${failed} for ${target}`);
+      reply.send({ success: true, closed, failed, total: open.length, phone: target });
+    } catch (e) {
+      console.error('[reset] error:', e);
       reply.status(500).send({ success: false, error: String(e) });
     }
   });
