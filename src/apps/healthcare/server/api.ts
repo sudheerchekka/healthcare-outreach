@@ -328,13 +328,23 @@ export async function startHealthcareAppServer(): Promise<void> {
 
   // ── Browser call: place outbound via REST API so CO captures it ──────────
   app.post('/api/browser-call', async (req, reply) => {
-    const { phone = '' } = req.body as Record<string, string>;
+    const { phone = '', profileId = '', name = '' } = req.body as Record<string, string>;
     const dialTo = OUTBOUND_CALL_TO || normalizePhone(phone);
+    const memberPhone = normalizePhone(phone);
     if (!dialTo) return reply.status(400).send({ success: false, error: 'No destination number' });
-    const answerUrl = `https://${VOICE_DOMAIN}/browser-answer-twiml`;
+    if (profileId) {
+      ciLiveResults.delete(profileId);
+      console.log(`[browser-call] cleared CI results for profileId=${profileId}`);
+    }
+    const answerParams = new URLSearchParams({ member_phone: memberPhone, profile_id: profileId, member_name: name });
+    const answerUrl = `https://${VOICE_DOMAIN}/browser-answer-twiml?${answerParams}`;
+    const statusCallback = `https://${VOICE_DOMAIN}/browser-call-status`;
     try {
-      const call = await twilioClient.calls.create({ to: dialTo, from: PHONE_NUMBER, url: answerUrl });
-      console.log(`[browser-call] placed callSid=${call.sid} to=${dialTo}`);
+      const call = await twilioClient.calls.create({
+        to: dialTo, from: PHONE_NUMBER, url: answerUrl,
+        statusCallback, statusCallbackMethod: 'POST', statusCallbackEvent: ['completed'],
+      });
+      console.log(`[browser-call] placed callSid=${call.sid} to=${dialTo} profileId=${profileId}`);
       reply.send({ success: true, call_sid: call.sid });
     } catch (e) {
       reply.status(500).send({ success: false, error: String(e) });

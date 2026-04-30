@@ -226,6 +226,11 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
             logger.error(f"[escalation] Twilio update failed status={res.status_code} conv_id={conv_id}")
             return False
         logger.info(f"[escalation] ✓ transferred conv_id={conv_id} call_sid={call_sid} reason={reason} urgency={urgency} queue={target_queue or FLEX_DEFAULT_QUEUE}")
+        try:
+            await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
+            logger.info(f"[escalation] closed Maestro conversation convId={conv_id}")
+        except Exception as e:
+            logger.error(f"[escalation] failed to close conversation convId={conv_id}: {e}")
         return True
     except Exception as e:
         logger.error(f"[escalation] transfer exception conv_id={conv_id}: {e}", exc_info=True)
@@ -930,7 +935,40 @@ async def ci_webhook_proxy(request: Request) -> dict:
 
 @app.post("/browser-answer-twiml")
 async def browser_answer_twiml(request: Request) -> Response:
-    """TwiML: connect member's answered call back to the browser via Twilio Client."""
+    """TwiML: bridge member to browser agent with a Maestro CO conversation for CI monitoring."""
+    from datetime import datetime, timezone
+    from tac.models import ParticipantAddress
+
+    form = {k: str(v) for k, v in (await request.form()).items()}
+    params = dict(request.query_params)
+    call_sid = form.get("CallSid", "")
+    member_phone = params.get("member_phone", form.get("To", ""))
+    profile_id = params.get("profile_id", "")
+    member_name = params.get("member_name", "member")
+
+    try:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conversation = await tac.maestro_client.create_conversation(
+            name=f"human-agent-call-{call_sid or ts}"
+        )
+        conv_id = conversation.id
+        member_resp = await tac.maestro_client.add_participant(
+            conversation_id=conv_id,
+            addresses=[ParticipantAddress(channel="VOICE", address=member_phone, channelId=call_sid)],
+            participant_type="CUSTOMER",
+        )
+        resolved_profile_id = (member_resp.profile_id if member_resp else None) or profile_id
+        await tac.maestro_client.add_participant(
+            conversation_id=conv_id,
+            addresses=[ParticipantAddress(channel="VOICE", address=PHONE_NUMBER, channelId=call_sid)],
+            participant_type="AI_AGENT",
+        )
+        outbound_conversation_map[conv_id] = {"phone": member_phone, "profileId": resolved_profile_id, "name": member_name}
+        conversation_call_sid_map[conv_id] = call_sid
+        logger.info(f"[browser-call] CO conversation created convId={conv_id} profileId={resolved_profile_id} callSid={call_sid}")
+    except Exception as e:
+        logger.error(f"[browser-call] failed to create CO conversation: {e}")
+
     twiml = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Dial>
@@ -938,6 +976,24 @@ async def browser_answer_twiml(request: Request) -> Response:
   </Dial>
 </Response>"""
     return Response(content=twiml, media_type="application/xml")
+
+
+@app.post("/browser-call-status")
+async def browser_call_status(request: Request) -> Response:
+    """Twilio status callback: close the CO conversation when the call completes."""
+    form = {k: str(v) for k, v in (await request.form()).items()}
+    call_sid = form.get("CallSid", "")
+    call_status = form.get("CallStatus", "")
+    logger.info(f"[browser-call] status callSid={call_sid} status={call_status}")
+    if call_status == "completed":
+        conv_id = next((c for c, s in conversation_call_sid_map.items() if s == call_sid), None)
+        if conv_id:
+            try:
+                await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
+                logger.info(f"[browser-call] closed CO conversation convId={conv_id}")
+            except Exception as e:
+                logger.error(f"[browser-call] failed to close conversation convId={conv_id}: {e}")
+    return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
 
 
 @app.post("/sms")
