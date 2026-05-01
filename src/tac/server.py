@@ -267,17 +267,23 @@ def _fetch_profile_traits(profile_id: str) -> dict:
         )
         data = res.json()
         traits: dict = {}
-        for trait_group in (data.get("traits") or []):
-            if not isinstance(trait_group, dict):
-                continue
-            attrs = trait_group.get("attributes") or {}
-            # attributes may be a dict of {key: value} or a list of {name, value} objects
-            if isinstance(attrs, dict):
-                traits.update(attrs)
-            elif isinstance(attrs, list):
-                for attr in attrs:
-                    if isinstance(attr, dict) and "name" in attr:
-                        traits[attr["name"]] = attr.get("value", "")
+        raw_traits = data.get("traits") or {}
+        # API returns traits as {"Contact": {...}, "outreach": {...}}
+        if isinstance(raw_traits, dict):
+            for group_val in raw_traits.values():
+                if isinstance(group_val, dict):
+                    traits.update(group_val)
+        elif isinstance(raw_traits, list):
+            for trait_group in raw_traits:
+                if not isinstance(trait_group, dict):
+                    continue
+                attrs = trait_group.get("attributes") or {}
+                if isinstance(attrs, dict):
+                    traits.update(attrs)
+                elif isinstance(attrs, list):
+                    for attr in attrs:
+                        if isinstance(attr, dict) and "name" in attr:
+                            traits[attr["name"]] = attr.get("value", "")
         return traits
     except Exception as e:
         logger.warning(f"[memory] fetchProfileTraits failed: {e}")
@@ -326,7 +332,9 @@ def _build_memory_context(memory: Optional[TACMemoryResponse], traits: Optional[
     sections = []
     if traits:
         trait_lines = []
-        if traits.get("name"):        trait_lines.append(f"- Name: {traits['name']}")
+        full_name = (f"{traits.get('firstName', '')} {traits.get('lastName', '')}".strip()
+                     or traits.get("name", ""))
+        if full_name:          trait_lines.append(f"- Name: {full_name}")
         if traits.get("phone"):       trait_lines.append(f"- Phone: {traits['phone']}")
         if traits.get("nextFollowUp"): trait_lines.append(f"- Next follow-up goal: {traits['nextFollowUp']}")
         if traits.get("nextFollowUpReason"): trait_lines.append(f"- Follow-up details: {traits['nextFollowUpReason']}")
@@ -345,7 +353,8 @@ def _build_memory_context(memory: Optional[TACMemoryResponse], traits: Optional[
     return "The following is from previous interactions with this member.\n\n" + "\n\n".join(sections)
 
 
-async def _invoke_agentcore_ws(session_id: str, prompt: str, system_prompt: str, context: str) -> str:
+async def _invoke_agentcore_ws(session_id: str, prompt: str, system_prompt: str, context: str,
+                               member_phone: str = "", profile_id: str = "", member_traits: Optional[dict] = None) -> str:
     """Invoke AgentCore via WebSocket (reuses the pooled connection like voice calls)."""
     agent_ws = await get_or_create_agent_ws(session_id)
     if not agent_ws:
@@ -361,23 +370,71 @@ async def _invoke_agentcore_ws(session_id: str, prompt: str, system_prompt: str,
     tokens: list[str] = []
     async for raw in agent_ws:
         data = json.loads(raw)
-        if data.get("type") == "text":
+        msg_type = data.get("type")
+        if msg_type == "text":
             token = data.get("token", "")
             if token:
                 tokens.append(token)
             if data.get("last", False):
                 break
-        elif data.get("type") == "tool_start":
+        elif msg_type == "schedule_call":
+            sc_phone = str(data.get("phone", "")) or member_phone
+            sc_reason = str(data.get("reason", ""))
+            logger.info(f"[schedule_call] sms: agent requested call profile_id={profile_id} phone={sc_phone} reason={sc_reason}")
+            asyncio.create_task(_trigger_outbound_call_by_profile(profile_id, sc_phone, sc_reason, traits=member_traits or {}))
+        elif msg_type == "tool_start":
             logger.info(f"[agentcore] sms tool_start tool={data.get('tool')}")
-        elif data.get("type") == "tool_result":
+        elif msg_type == "tool_result":
             logger.info(f"[agentcore] sms tool_result status={data.get('status')}")
+        else:
+            logger.info(f"[agentcore] sms ws msg type={msg_type} data={str(data)[:200]}")
 
     return "".join(tokens).strip()
 
 
-async def _invoke_agentcore_http(session_id: str, prompt: str, system_prompt: str, context: str) -> str:
+async def _invoke_agentcore_http(session_id: str, prompt: str, system_prompt: str, context: str,
+                                 member_phone: str = "", profile_id: str = "", member_traits: Optional[dict] = None) -> str:
     """Invoke AgentCore via WebSocket (AgentCore only speaks WS, both local and deployed)."""
-    return await _invoke_agentcore_ws(session_id, prompt, system_prompt, context)
+    return await _invoke_agentcore_ws(session_id, prompt, system_prompt, context,
+                                      member_phone=member_phone, profile_id=profile_id, member_traits=member_traits)
+
+
+async def _trigger_outbound_call(conv_id: str, phone: str, reason: str) -> None:
+    """Trigger outbound call from voice context (conv_id → outbound_conversation_map)."""
+    map_entry = outbound_conversation_map.get(conv_id)
+    name = map_entry.get("name", "Member") if isinstance(map_entry, dict) else "Member"
+    profile_id = map_entry.get("profileId", "") if isinstance(map_entry, dict) else ""
+    await _trigger_outbound_call_by_profile(profile_id, phone, reason, name=name)
+
+
+async def _trigger_outbound_call_by_profile(profile_id: str, phone: str, reason: str, name: str = "", traits: Optional[dict] = None) -> None:
+    """Trigger outbound call using profile_id. Fetches profile traits if not provided."""
+    t = traits or {}
+    # If no useful data, fetch directly from Memory Store
+    if not t and profile_id:
+        loop = asyncio.get_event_loop()
+        t = await loop.run_in_executor(None, _fetch_profile_traits, profile_id)
+        logger.info(f"[schedule_call] fetched traits for profile_id={profile_id} keys={list(t.keys())}")
+    if not name:
+        # _fetch_profile_traits returns flat keys: firstName, lastName (from Contact group)
+        name = (f"{t.get('firstName', '')} {t.get('lastName', '')}".strip()
+                or t.get("name", "") or "Member")
+    if not phone:
+        phone = t.get("phone", "")
+    goal = t.get("nextFollowUp", "") or t.get("next_follow_up", "")
+    goal_desc = t.get("nextFollowUpReason", "") or t.get("next_follow_up_reason", "") or reason
+    logger.info(f"[schedule_call] resolved name={name} phone={phone} goal={goal!r} traits_keys={list(t.keys())}")
+    logger.info(f"[schedule_call] triggering call name={name} phone={phone} goal={goal!r} profileId={profile_id}")
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(
+                f"http://localhost:{APP_PORT}/api/outbound-call",
+                json={"name": name, "phone": phone, "goal": goal, "goalDesc": goal_desc, "profileId": profile_id},
+                timeout=10,
+            )
+            logger.info(f"[schedule_call] outbound call triggered phone={phone} status={res.status_code} body={res.text[:200]}")
+    except Exception as e:
+        logger.error(f"[schedule_call] failed to trigger call: {e}", exc_info=True)
 
 
 async def _push_transcript_event(profile_id: str, role: str, text: str) -> None:
@@ -429,6 +486,17 @@ def _build_inbound_system_prompt() -> str:
         if text:
             return text
     return _DEFAULT_INBOUND_PROMPT
+
+
+_SMS_PROMPT_FILE = pathlib.Path(__file__).parent / "system_prompt_sms.txt"
+
+def _build_sms_system_prompt() -> str:
+    if _SMS_PROMPT_FILE.exists():
+        text = _SMS_PROMPT_FILE.read_text().strip()
+        if text:
+            return text
+    return _build_inbound_system_prompt()
+
 
 # ---------------------------------------------------------------------------
 # AgentCore WebSocket pool
@@ -658,6 +726,8 @@ async def handle_message_ready(
                 async for raw in agent_ws:
                     data = json.loads(raw)
                     msg_type = data.get("type", "")
+                    if msg_type not in ("text",):
+                        logger.info(f"[agentcore] ws msg type={msg_type} data={str(data)[:200]}")
                     if msg_type == "text":
                         token = data.get("token", "")
                         if token:
@@ -672,6 +742,15 @@ async def handle_message_ready(
                                     _transcript_profile_id, "agent", "".join(collected)
                                 ))
                             break
+                    elif msg_type == "schedule_call":
+                        sc_phone = str(data.get("phone", ""))
+                        sc_reason = str(data.get("reason", ""))
+                        if not sc_phone:
+                            map_entry = outbound_conversation_map.get(conv_id)
+                            sc_phone = map_entry.get("phone", "") if isinstance(map_entry, dict) else ""
+                        logger.info(f"[schedule_call] agent requested call conv_id={conv_id} phone={sc_phone} reason={sc_reason}")
+                        asyncio.create_task(_trigger_outbound_call(conv_id, sc_phone, sc_reason))
+                        break
                     elif msg_type == "escalate":
                         reason = str(data.get("reason", "member_requested_human"))
                         urgency = str(data.get("urgency", "normal"))
@@ -1063,7 +1142,7 @@ async def post_sms(request: Request) -> Response:
     logger.info(f"[sms] memory+ws parallel fetch in {(time.time()-t0)*1000:.0f}ms")
 
     context = _build_memory_context(memory, traits)
-    system_prompt = _build_inbound_system_prompt()
+    system_prompt = _build_sms_system_prompt()
 
     try:
         reply = await _invoke_agentcore_http(
@@ -1071,6 +1150,9 @@ async def post_sms(request: Request) -> Response:
             prompt=body,
             system_prompt=system_prompt,
             context=context,
+            member_phone=lookup_phone,
+            profile_id=profile_id,
+            member_traits=traits,
         )
     except Exception as e:
         logger.error(f"[sms] AgentCore invocation failed: {e}")

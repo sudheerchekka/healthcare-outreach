@@ -61,6 +61,23 @@ def _load_system_prompt() -> str:
 SYSTEM_PROMPT = _load_system_prompt()
 
 escalation_state: dict = {}
+schedule_call_state: dict = {}
+
+
+@tool
+def schedule_call(phone: str = "", reason: str = "") -> str:
+    """Schedule an outbound AI agent call to the member when they ask to be called.
+
+    Call this when the member asks to receive a phone call (e.g. 'Can you call me?',
+    'I prefer to talk on the phone', 'Please call me').
+    phone: member's phone number — use the phone from their profile in your memory context.
+    reason: brief reason for the call (optional).
+    """
+    schedule_call_state["triggered"] = True
+    schedule_call_state["phone"] = phone
+    schedule_call_state["reason"] = reason
+    log.info(f"[schedule_call] triggered phone={phone} reason={reason}")
+    return json.dumps({"schedule_call": True, "phone": phone, "reason": reason})
 
 
 @tool
@@ -252,6 +269,7 @@ async def handle_voice_websocket(websocket, request_context=None):
             log.info("[ws] stream cancelled (interrupt)")
             raise
         finally:
+            log.info(f"[ws] _stream_and_send finally: escalation_state={dict(escalation_state)} schedule_call_state={dict(schedule_call_state)}")
             # Send escalate signal before sentinel if tool was triggered
             if escalation_state.get("triggered"):
                 esc_reason = escalation_state.get("reason", "member_requested_human")
@@ -267,6 +285,19 @@ async def handle_voice_websocket(websocket, request_context=None):
                     log.info(f"[escalation] signal sent reason={esc_reason} urgency={esc_urgency}")
                 except Exception as e:
                     log.warning(f"[escalation] signal send failed: {e}")
+            if schedule_call_state.get("triggered"):
+                sc_phone = schedule_call_state.get("phone", "")
+                sc_reason = schedule_call_state.get("reason", "")
+                schedule_call_state.clear()
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "schedule_call",
+                        "phone": sc_phone,
+                        "reason": sc_reason,
+                    }))
+                    log.info(f"[schedule_call] signal sent phone={sc_phone}")
+                except Exception as e:
+                    log.warning(f"[schedule_call] signal send failed: {e}")
             try:
                 await websocket.send_text(json.dumps({"type": "text", "token": "", "last": True}))
             except Exception as e:
@@ -292,7 +323,7 @@ async def handle_voice_websocket(websocket, request_context=None):
                 if agent is None:
                     base_system = SYSTEM_PROMPT
                     effective_system = f"{base_system}\n\n{system_prompt}" if system_prompt else base_system
-                    agent = Agent(model=load_model(), system_prompt=effective_system, tools=[escalate_to_human])
+                    agent = Agent(model=load_model(), system_prompt=effective_system, tools=[escalate_to_human, schedule_call])
                     log.info(f"[ws] agent created system_prompt_len={len(effective_system)}")
 
                 input_text = (
