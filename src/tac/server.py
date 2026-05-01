@@ -38,6 +38,7 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Optional
 
+import httpx
 import requests
 import websockets
 from base64 import b64encode
@@ -379,6 +380,18 @@ async def _invoke_agentcore_http(session_id: str, prompt: str, system_prompt: st
     return await _invoke_agentcore_ws(session_id, prompt, system_prompt, context)
 
 
+async def _push_transcript_event(profile_id: str, role: str, text: str) -> None:
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"http://localhost:{APP_PORT}/transcript-event",
+                json={"profileId": profile_id, "role": role, "text": text},
+                timeout=3,
+            )
+    except Exception as e:
+        logger.warning(f"[transcript] push failed role={role}: {e}")
+
+
 def _write_sms_observation(profile_id: str, role: str, content: str) -> None:
     from datetime import datetime
     obs_content = f"[SMS {role}] {content}"
@@ -536,6 +549,12 @@ class OwlVoiceChannel(VoiceChannel):
         if ctx and phone:
             outbound_conversation_map[conv_id] = {"phone": phone, "profileId": member_profile_id or ""}
             logger.info(f"[setup] outbound_conversation_map[{conv_id}] phone={phone} profileId={member_profile_id or '(pending)'}")
+            greeting = ctx.get("greeting", "")
+            if greeting and member_profile_id:
+                asyncio.get_event_loop().create_task(
+                    _push_transcript_event(member_profile_id, "agent", greeting),
+                    name=f"transcript-greeting-{conv_id}",
+                )
 
         asyncio.get_event_loop().create_task(
             _prewarm(conv_id, session_id, phone),
@@ -557,6 +576,12 @@ async def handle_message_ready(
     t0 = time.time()
     conv_id = context.conversation_id
     session_id = context.profile_id or conv_id
+
+    # Resolve profile_id for transcript push (available after _handle_setup runs)
+    _map_entry = outbound_conversation_map.get(conv_id)
+    _transcript_profile_id = _map_entry.get("profileId", "") if isinstance(_map_entry, dict) else ""
+    if _transcript_profile_id and user_message:
+        asyncio.create_task(_push_transcript_event(_transcript_profile_id, "member", user_message))
 
     # Turn 1: resolve outbound context + build enriched prompt
     is_turn1 = conv_id not in system_prompt_cache
@@ -628,6 +653,7 @@ async def handle_message_ready(
 
         async def stream_from_agent() -> AsyncGenerator[str, None]:
             first_token = False
+            collected: list[str] = []
             try:
                 async for raw in agent_ws:
                     data = json.loads(raw)
@@ -638,8 +664,13 @@ async def handle_message_ready(
                             if not first_token:
                                 logger.info(f"[healthcare] TTFT {(time.time()-t0)*1000:.0f}ms")
                                 first_token = True
+                            collected.append(token)
                             yield token
                         if data.get("last", False):
+                            if _transcript_profile_id and collected:
+                                asyncio.create_task(_push_transcript_event(
+                                    _transcript_profile_id, "agent", "".join(collected)
+                                ))
                             break
                     elif msg_type == "escalate":
                         reason = str(data.get("reason", "member_requested_human"))

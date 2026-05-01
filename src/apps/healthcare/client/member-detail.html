@@ -193,6 +193,16 @@
     @keyframes pulse { 0%,100% { box-shadow: 0 0 0 3px rgba(16,185,129,.2); } 50% { box-shadow: 0 0 0 6px rgba(16,185,129,.05); } }
     .live-status { display: flex; align-items: center; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
 
+    /* ── Transcript thread ──────────────────────────────────────── */
+    #transcriptThread { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; max-height: 520px; overflow-y: auto; padding-right: 4px; }
+    .msg-wrap        { display: flex; flex-direction: column; max-width: 70%; }
+    .msg-wrap.agent  { align-self: flex-end; align-items: flex-end; }
+    .msg-wrap.member { align-self: flex-start; align-items: flex-start; }
+    .msg-label       { font-size: 10px; color: var(--text-muted); margin-bottom: 3px; }
+    .msg-bubble      { padding: 10px 14px; border-radius: 16px; font-size: 13px; line-height: 1.5; }
+    .msg-member      { background: #007AFF; color: #fff; border-bottom-left-radius: 4px; }
+    .msg-agent       { background: var(--dark-light); color: var(--dark); border-bottom-right-radius: 4px; }
+
     /* ── Traits section ─────────────────────────────────────────── */
     .traits-section { margin-top: 32px; }
     .traits-section h3 { font-size: 15px; font-weight: 700; margin: 0 0 12px; }
@@ -269,7 +279,7 @@
       <div class="profile-traits">
         <div class="trait"><strong>Member ID</strong><br><span id="profileMemberId">—</span></div>
         <div class="trait"><strong>Phone</strong><br><span id="profilePhone">—</span></div>
-        <div class="trait"><strong>Profile ID</strong><br><span id="profileId" style="font-size:11px;font-family:monospace"></span></div>
+        <div class="trait" style="display:none"><strong>Profile ID</strong><br><span id="profileId" style="font-size:11px;font-family:monospace"></span></div>
       </div>
     </div>
     <div style="display:flex;gap:10px;align-items:center;flex-shrink:0">
@@ -298,6 +308,7 @@
     <div class="tab active" onclick="switchTab('memory', this)">Memory</div>
     <div class="tab" onclick="switchTab('traits', this)">Traits</div>
     <div class="tab" onclick="switchTab('live', this)">Operator Results</div>
+    <div class="tab" onclick="switchTab('transcript', this)">Transcript</div>
   </div>
 
   <!-- Tab: Memory (observations + summaries) -->
@@ -351,6 +362,18 @@
     <div class="live-grid" id="liveGrid">
       <div class="live-card"><div class="live-card-empty">No operators configured — add CI_OPERATOR_*_SID to .env</div></div>
     </div>
+  </div>
+
+  <!-- Tab: Transcript -->
+  <div id="tab-transcript" class="tab-panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <div class="live-status" style="margin-bottom:0">
+        <span class="live-dot" id="transcriptDot"></span>
+        <span id="transcriptStatus">Waiting for call…</span>
+      </div>
+      <button class="btn-refresh" onclick="clearTranscript()" style="font-size:12px;padding:5px 12px">Clear</button>
+    </div>
+    <div id="transcriptThread"></div>
   </div>
 </main>
 
@@ -725,6 +748,43 @@
     { category_key: 'Wrap Up',             criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
   ];
 
+  /* ── Transcript SSE ─────────────────────────────────────────── */
+  let transcriptSse = null;
+
+  function startTranscriptSSE() {
+    if (transcriptSse) transcriptSse.close();
+    transcriptSse = new EventSource(`http://localhost:8001/api/transcript/${encodeURIComponent(profileId)}/stream`);
+    transcriptSse.onopen = () => {
+      document.getElementById('transcriptDot').classList.add('active');
+      document.getElementById('transcriptStatus').textContent = 'Connected — waiting for messages…';
+    };
+    transcriptSse.onmessage = (e) => {
+      try { appendTranscriptMessage(JSON.parse(e.data)); } catch {}
+    };
+    transcriptSse.onerror = () => {
+      document.getElementById('transcriptDot').classList.remove('active');
+      document.getElementById('transcriptStatus').textContent = 'Reconnecting…';
+    };
+  }
+
+  function clearTranscript() {
+    document.getElementById('transcriptThread').innerHTML = '';
+    fetch(`http://localhost:8001/api/transcript/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
+  }
+
+  function appendTranscriptMessage({ role, text, ts }) {
+    const thread = document.getElementById('transcriptThread');
+    const isAgent = role === 'agent';
+    const label   = isAgent ? 'AI Agent 🤖' : 'Member';
+    const time    = ts ? new Date(ts).toLocaleTimeString() : '';
+    const wrap    = document.createElement('div');
+    wrap.className = `msg-wrap ${isAgent ? 'agent' : 'member'}`;
+    wrap.innerHTML = `<div class="msg-label">${label} · ${time}</div>
+      <div class="msg-bubble ${isAgent ? 'msg-agent' : 'msg-member'}">${text}</div>`;
+    thread.appendChild(wrap);
+    thread.scrollTop = thread.scrollHeight;
+  }
+
   /* ── Live operator results via SSE ──────────────────────────── */
   let sseSource = null;
 
@@ -803,9 +863,11 @@
   if (!profileId) {
     document.querySelector('main').innerHTML = '<p style="padding:40px;color:var(--text-muted)">No profile ID provided.</p>';
   } else {
+    fetch(`http://localhost:8001/api/ci-results/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
     loadProfile();
     loadDetail();
     startSSE();
+    startTranscriptSSE();
   }
 </script>
 </body>

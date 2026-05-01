@@ -47,6 +47,9 @@ const ciFlushTimers   = new Map<string, ReturnType<typeof setTimeout>>();
 const ciLiveResults = new Map<string, Record<string, { label: string; result: string; json?: unknown; ts: string }>>();
 // ── SSE subscribers (profileId → set of response streams) ───────────────────
 const ciSseClients = new Map<string, Set<import('http').ServerResponse>>();
+// ── Transcript store (profileId → messages[]) ────────────────────────────────
+const transcriptMessages = new Map<string, { role: string; text: string; ts: string }[]>();
+const transcriptSseClients = new Map<string, Set<import('http').ServerResponse>>();
 
 function scheduleCIFlush(profileId: string): void {
   const existing = ciFlushTimers.get(profileId);
@@ -150,7 +153,8 @@ export async function startHealthcareAppServer(): Promise<void> {
     // server reads it from the query string to look up pending context.
     if (profileId) {
       ciLiveResults.delete(profileId);
-      console.log(`[outbound-call] cleared CI results for profileId=${profileId}`);
+      transcriptMessages.delete(profileId);
+      console.log(`[outbound-call] cleared CI results + transcript for profileId=${profileId}`);
     }
 
     const convId = `outbound-${memberPhone}-${Date.now()}`;
@@ -278,6 +282,13 @@ export async function startHealthcareAppServer(): Promise<void> {
     reply.send({ operators: CI_OPERATORS, results: ciLiveResults.get(profileId) ?? {} });
   });
 
+  app.delete('/api/ci-results/:profileId', async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    ciLiveResults.delete(profileId);
+    console.log(`[CI] cleared results for profileId=${profileId}`);
+    reply.send({ success: true });
+  });
+
   // ── Live CI operator results (SSE stream) ────────────────────────────────
   // Subscribers keyed by profileId; each call to this endpoint registers a sender.
   app.get('/api/ci-results/:profileId/stream', async (req, reply) => {
@@ -312,6 +323,45 @@ export async function startHealthcareAppServer(): Promise<void> {
       console.log(`[SSE] subscriber disconnected profileId=${profileId} remaining=${ciSseClients.get(profileId)?.size ?? 0}`);
     });
   });
+
+  app.delete('/api/transcript/:profileId', async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    transcriptMessages.delete(profileId);
+    reply.send({ success: true });
+  });
+
+  // ── Transcript: receive event from TAC server ────────────────────────────
+  app.post('/transcript-event', async (req, reply) => {
+    const { profileId, role, text } = req.body as Record<string, string>;
+    if (!profileId || !text) return reply.send({ success: false });
+    const msg = { role, text, ts: new Date().toISOString() };
+    const msgs = transcriptMessages.get(profileId) ?? [];
+    msgs.push(msg);
+    transcriptMessages.set(profileId, msgs);
+    transcriptSseClients.get(profileId)?.forEach(c => c.write(`data: ${JSON.stringify(msg)}\n\n`));
+    reply.send({ success: true });
+  });
+
+  // ── Transcript SSE stream ────────────────────────────────────────────────
+  app.get('/api/transcript/:profileId/stream', async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    reply.hijack();
+    const raw = reply.raw;
+    raw.setHeader('Content-Type', 'text/event-stream');
+    raw.setHeader('Cache-Control', 'no-cache');
+    raw.setHeader('Connection', 'keep-alive');
+    raw.setHeader('Access-Control-Allow-Origin', '*');
+    raw.flushHeaders();
+    (transcriptMessages.get(profileId) ?? []).forEach(m => raw.write(`data: ${JSON.stringify(m)}\n\n`));
+    if (!transcriptSseClients.has(profileId)) transcriptSseClients.set(profileId, new Set());
+    transcriptSseClients.get(profileId)!.add(raw);
+    const ping = setInterval(() => raw.write(': ping\n\n'), 25000);
+    req.raw.on('close', () => {
+      clearInterval(ping);
+      transcriptSseClients.get(profileId)?.delete(raw);
+    });
+  });
+
 
   // ── Browser call token (Twilio Client SDK) ───────────────────────────────
   app.get('/api/browser-call-token', async (_req, reply) => {
