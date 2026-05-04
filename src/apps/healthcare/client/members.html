@@ -211,9 +211,10 @@
       font-size: 11px; font-weight: 600;
       text-transform: uppercase; letter-spacing: .4px;
     }
-    .s-pending   { background: #fef3c7; color: #92400e; }
-    .s-scheduled { background: #dbeafe; color: #1e40af; }
-    .s-completed { background: #d1fae5; color: #065f46; }
+    .s-pending        { background: #fef3c7; color: #92400e; }
+    .s-scheduled      { background: #dbeafe; color: #1e40af; }
+    .s-completed      { background: #d1fae5; color: #065f46; }
+    .s-needs_followup { background: #fee2e2; color: #991b1b; }
     .status-ts   { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
 
     /* ── Summary / responses columns ───────────────────────────── */
@@ -346,8 +347,7 @@
 <div class="hero">
   <div class="hero-inner">
     <div>
-      <h1>Member Outreach Dashboard</h1>
-      <p>Live member data from Conversation Memory — reach members by SMS or voice call</p>
+      <h1>Care Team Dashboard</h1>
     </div>
     <div class="hero-stats">
       <div class="stat">
@@ -414,6 +414,7 @@
     <span class="pill" onclick="setFilter('pending', this)">Pending</span>
     <span class="pill" onclick="setFilter('scheduled', this)">Scheduled</span>
     <span class="pill" onclick="setFilter('completed', this)">Completed</span>
+    <span class="pill" onclick="setFilter('needs_followup', this)">Need Follow-up</span>
   </div>
 
   <div class="card">
@@ -573,6 +574,7 @@
     tbody.innerHTML = filtered.map((m, i) => {
       const idx = members.indexOf(m);
       const status = m.status || 'pending';
+      const statusLabel = { pending: 'Pending', scheduled: 'Scheduled', completed: 'Completed', needs_followup: 'Need Follow-up' }[status] ?? status;
       const { text: summaryText, ts: summaryTs } = stripPrefix(m.last_call_summary || '');
       const { text: responsesRaw, ts: responsesTs } = stripPrefix(m.outreach_responses || '');
       const callTs = summaryTs || responsesTs;
@@ -602,7 +604,7 @@
           >${m.next_follow_up_reason || ''}</div>
         </td>
         <td class="status-cell">
-          <span class="status-badge s-${status}">${status}</span>
+          <span class="status-badge s-${status}">${statusLabel}</span>
           ${callTs ? `<div class="status-ts">${callTs}</div>` : ''}
         </td>
         <td class="responses-cell">

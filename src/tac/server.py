@@ -125,6 +125,8 @@ tac = TAC(config=TACConfig.from_env())
 # ---------------------------------------------------------------------------
 
 agent_connections: dict[str, websockets.ClientConnection] = {}
+agent_connection_times: dict[str, float] = {}  # session_id → time.time() when connected
+_AGENTCORE_WS_TTL = 270  # presigned URLs expire at 300s; reconnect before that
 pending_outbound_context: dict[str, dict] = {}
 outbound_conversation_map: dict[str, str] = {}
 conversation_call_sid_map: dict[str, str] = {}
@@ -505,9 +507,12 @@ def _build_sms_system_prompt() -> str:
 async def get_or_create_agent_ws(session_id: str) -> Optional[websockets.ClientConnection]:
     if session_id in agent_connections:
         ws = agent_connections[session_id]
-        if ws.state.name == "OPEN":
+        age = time.time() - agent_connection_times.get(session_id, 0)
+        if ws.state.name == "OPEN" and age < _AGENTCORE_WS_TTL:
             return ws
+        logger.info(f"[agentcore] evicting connection session_id={session_id} age={age:.0f}s state={ws.state.name}")
         del agent_connections[session_id]
+        agent_connection_times.pop(session_id, None)
 
     try:
         t0 = time.time()
@@ -528,6 +533,7 @@ async def get_or_create_agent_ws(session_id: str) -> Optional[websockets.ClientC
         _ssl_ctx.verify_mode = _ssl.CERT_NONE
         ws = await websockets.connect(url, ssl=_ssl_ctx)
         agent_connections[session_id] = ws
+        agent_connection_times[session_id] = time.time()
         logger.info(f"[agentcore] connected session_id={session_id} in {(time.time()-t0)*1000:.0f}ms")
         return ws
     except Exception as e:

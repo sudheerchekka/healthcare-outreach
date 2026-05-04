@@ -717,7 +717,10 @@ export async function startHealthcareAppServer(): Promise<void> {
     }
 
     if (summaryText || outreachAnalysis) {
-      pending.status = 'completed';
+      let interactions: { flag?: string }[] = [];
+      try { interactions = outreachAnalysis ? JSON.parse(outreachAnalysis) : []; } catch { /* ignore */ }
+      const needsFollowup = interactions.some(i => String(i.flag).toLowerCase() === 'yes');
+      pending.status = needsFollowup ? 'needs_followup' : 'completed';
     }
 
     ciPendingTraits.set(profileId, pending);
