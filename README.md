@@ -1,6 +1,6 @@
 # Owl Health Member Outreach — Node.js / TypeScript
 
-A care outreach demo supporting two voice agent backends — **AWS AgentCore** (Strands Agent) and **ElevenLabs Conversational AI** — with **Twilio Agent Connect (TAC)** for voice, memory, and conversation intelligence.
+A care outreach demo supporting three voice agent backends — **AWS AgentCore** (Strands Agent), **Google Vertex AI Agent Engine** (Gemini), and **ElevenLabs Conversational AI** — with **Twilio Agent Connect (TAC)** for voice, memory, and conversation intelligence.
 
 ---
 
@@ -89,6 +89,7 @@ Set `AGENT_BACKEND` in `.env` to switch between backends. **ngrok always points 
 | `AGENT_BACKEND` | Voice AI | TwiML type | TAC role |
 |---|---|---|---|
 | `agentcore` (default) | AWS AgentCore (Strands + Claude) | ConversationRelay | Full voice stack — STT, agent, TTS |
+| `vertexai` | Google Vertex AI Agent Engine (Gemini) | ConversationRelay | Full voice stack — STT, agent, TTS |
 | `elevenlabs` | ElevenLabs Conversational AI | `<Stream>` | Gateway — proxies raw audio via `/ws-el` to ElevenLabs server on port 8002 |
 
 **How it works when `AGENT_BACKEND=elevenlabs`:**
@@ -102,13 +103,13 @@ Set `AGENT_BACKEND` in `.env` to switch between backends. **ngrok always points 
 
 **What differs between backends:**
 
-| Feature | `agentcore` | `elevenlabs` |
-|---|---|---|
-| STT / TTS | Twilio (ConversationRelay) | ElevenLabs |
-| LLM | AWS Bedrock (Claude Opus 4) | ElevenLabs agent |
-| TAC Memory Store | Yes | Yes (fetched at call start) |
-| Conversation Intelligence | Yes | Yes (CI webhooks unchanged) |
-| Inbound call routing | Yes (`/twiml`) | Partial — inbound TwiML not wired to ElevenLabs |
+| Feature | `agentcore` | `vertexai` | `elevenlabs` |
+|---|---|---|---|
+| STT / TTS | Twilio (ConversationRelay) | Twilio (ConversationRelay) | ElevenLabs |
+| LLM | AWS Bedrock (Claude Opus 4) | Google Gemini (Vertex AI) | ElevenLabs agent |
+| TAC Memory Store | Yes | Yes | Yes (fetched at call start) |
+| Conversation Intelligence | Yes | Yes | Yes (CI webhooks unchanged) |
+| Inbound call routing | Yes (`/twiml`) | Yes (`/twiml`) | Partial — inbound TwiML not wired to ElevenLabs |
 
 ---
 
@@ -233,10 +234,19 @@ cp .env.example .env
 
 | Variable | Description |
 |---|---|
-| `AGENT_BACKEND` | `agentcore` (default) or `elevenlabs` — controls which voice backend TAC routes to |
+| `AGENT_BACKEND` | `agentcore` (default), `vertexai`, or `elevenlabs` — controls which voice backend TAC routes to |
 | `ELEVENLABS_API_KEY` | ElevenLabs API key (`elevenlabs` backend only) |
 | `ELEVENLABS_AGENT_ID` | ElevenLabs Agent ID (`elevenlabs` backend only) |
 | `ELEVENLABS_PORT` | ElevenLabs server port (default: `8002`) |
+
+**Vertex AI / Gemini** (read by TAC server when `AGENT_BACKEND=vertexai`):
+
+| Variable | Description |
+|---|---|
+| `VERTEXAI_PROJECT` | Google Cloud project ID |
+| `VERTEXAI_LOCATION` | Vertex AI region (e.g. `us-central1`) |
+| `VERTEXAI_AGENT_ID` | Deployed Vertex AI Agent Engine resource name |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCP service account JSON key file (or use ADC) |
 
 **Conversation Intelligence live results** (read by `api.ts`):
 
