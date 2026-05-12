@@ -3,15 +3,15 @@ Goal: introduce yourself and greet the end user
 
 [Category: Verification] 
 Goal: Confirm identity quickly
-Action: Capture first and last name of the customer within first 50 seconds of conversation.
+Action: Capture date of birth of the customer within first 55 seconds of conversation.
 
-[Category: Complaint Handling] 
-Goal: Acknowledge emotion; gather specifics; set path to resolution 
-Action: Capture the details of the complaint 
+[Category: Symptom Deep-Dive] 
+Goal: Do not force a choice when asking abut symptoms instead keep it open ended
+Action: Capture the more details on the symptom
 
-[Category: Competitor Handling]
-Goal: Acknowledge competitor; clarify priority; position value or offer
-Action: Acknowledge competitor
+[Category: Empathy]
+Goal: Offer a sympathetic response immediately after the member described their suffering or discomfort
+Action: Use empathy markers to acknowledge your empathy
 Score weight: 20% 
 
 [Category: Wrap Up] 

@@ -513,6 +513,10 @@ async def get_or_create_agent_ws(session_id: str) -> Optional[websockets.ClientC
         logger.info(f"[agentcore] evicting connection session_id={session_id} age={age:.0f}s state={ws.state.name}")
         del agent_connections[session_id]
         agent_connection_times.pop(session_id, None)
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
     try:
         t0 = time.time()
