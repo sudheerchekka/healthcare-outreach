@@ -1148,7 +1148,7 @@ async def post_sms(request: Request) -> Response:
     t0 = time.time()
     memory_task = asyncio.create_task(_prefetch_memory(lookup_phone, profile_id=profile_id))
     ws_task = asyncio.create_task(get_or_create_agent_ws(profile_id))
-    memory, traits = await memory_task
+    (memory, traits), _ = await asyncio.gather(memory_task, ws_task)
     logger.info(f"[sms] memory+ws parallel fetch in {(time.time()-t0)*1000:.0f}ms")
 
     context = _build_memory_context(memory, traits)
