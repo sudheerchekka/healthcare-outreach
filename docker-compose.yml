@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"   # TAC server (Twilio webhooks)
+      - "8001:8001"   # Node.js app server (dashboard)
+    env_file:
+      - .env
+    volumes:
+      # Mount src/tac so system prompt edits are live without rebuild
+      - ./src/tac:/app/src/tac:ro
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

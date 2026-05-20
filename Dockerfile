@@ -20,8 +20,14 @@ COPY src/ ./src/
 COPY tsconfig.json ./
 RUN npm run build
 
-# Copy static client files where __dirname resolves to in compiled output
-RUN cp -r src/apps/healthcare/client dist/apps/healthcare/client
+# Copy per-app client/ dirs into the compiled output tree
+RUN find src/apps -maxdepth 2 -name client -type d | while read d; do \
+      dest="dist/${d#src/}"; \
+      mkdir -p "$dest" && cp -r "$d/." "$dest/"; \
+    done
+
+# Copy TAC server source (runs directly, not compiled)
+RUN cp -r src/tac dist/tac
 
 EXPOSE 8000 8001
 
