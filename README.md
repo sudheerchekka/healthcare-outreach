@@ -2,6 +2,8 @@
 
 A care outreach demo supporting three voice agent backends — **AWS AgentCore** (Strands Agent), **Google Vertex AI Agent Engine** (Gemini), and **ElevenLabs Conversational AI** — with **Twilio Agent Connect (TAC)** for voice, memory, and conversation intelligence.
 
+The website has a chat feature
+
 ---
 
 ## Overview
