@@ -9,6 +9,11 @@ Action: Capture date of birth of the customer within first 55 seconds of convers
 Goal: Do not force a choice when asking abut symptoms instead keep it open ended
 Action: Capture the more details on the symptom
 
+[Category: Red flag symptoms] 
+Goal: Check if there are any red flag symptoms
+Action: Help direct the member to 911
+
+
 [Category: Empathy]
 Goal: Offer a sympathetic response immediately after the member described their suffering or discomfort
 Action: Use empathy markers to acknowledge your empathy
