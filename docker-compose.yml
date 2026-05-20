@@ -6,6 +6,11 @@ services:
       - "8001:8001"   # Node.js app server (dashboard)
     env_file:
       - .env
+    environment:
+      # Explicit AWS keys take precedence over any AWS_PROFILE in .env
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
     volumes:
       # Mount src/tac so system prompt edits are live without rebuild
       - ./src/tac:/app/src/tac:ro

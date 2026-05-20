@@ -10,6 +10,9 @@ prefix() {
   done
 }
 
+# When explicit AWS keys are present, unset AWS_PROFILE so boto3 doesn't attempt profile lookup
+if [ -n "$AWS_ACCESS_KEY_ID" ]; then unset AWS_PROFILE; fi
+
 cd /app/src/tac && prefix TAC uvicorn server:app --host 0.0.0.0 --port 8000 &
 prefix APP node /app/dist/index.js &
 

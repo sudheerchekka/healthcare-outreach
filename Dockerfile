@@ -20,14 +20,15 @@ COPY src/ ./src/
 COPY tsconfig.json ./
 RUN npm run build
 
-# Copy per-app client/ dirs into the compiled output tree
-RUN find src/apps -maxdepth 2 -name client -type d | while read d; do \
+# Copy per-app client/ dirs and app.json configs into the compiled output tree
+RUN find src/apps -maxdepth 2 \( -name client -type d \) | while read d; do \
       dest="dist/${d#src/}"; \
       mkdir -p "$dest" && cp -r "$d/." "$dest/"; \
+    done && \
+    find src/apps -maxdepth 2 -name app.json | while read f; do \
+      dest="dist/${f#src/}"; \
+      mkdir -p "$(dirname $dest)" && cp "$f" "$dest"; \
     done
-
-# Copy TAC server source (runs directly, not compiled)
-RUN cp -r src/tac dist/tac
 
 EXPOSE 8000 8001
 
