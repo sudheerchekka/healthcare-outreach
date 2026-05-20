@@ -9,3 +9,5 @@ boto3
 requests
 httpx
 twilio
+google-cloud-aiplatform>=1.60.0  # Vertex AI Agent Engine SDK (used when AGENT_PROVIDER=vertexai)
+google-adk>=0.1.0                 # Google Agent Development Kit

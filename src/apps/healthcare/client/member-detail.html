@@ -267,7 +267,7 @@
 </header>
 
 <main>
-  <a class="back-link" href="/members.html">
+  <a class="back-link" href="members.html">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
     Back to Members
   </a>
@@ -411,7 +411,7 @@
   /* ── Load profile info from members API ─────────────────────── */
   async function loadProfile() {
     try {
-      const res  = await fetch('http://localhost:8001/api/members');
+      const res  = await fetch('api/members');
       const data = await res.json();
       const m    = (data.members || []).find(x => x.profile_id === profileId);
       if (!m) return;
@@ -431,7 +431,7 @@
   /* ── Load observations + summaries ──────────────────────────── */
   async function loadDetail() {
     try {
-      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}`);
+      const res  = await fetch(`api/member-detail/${encodeURIComponent(profileId)}`);
       const data = await res.json();
       renderObs(data.observations || []);
       renderSum(data.summaries   || []);
@@ -490,7 +490,7 @@
     if (!confirm('Delete this observation?')) return;
     btn.disabled = true;
     try {
-      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}/observations/${encodeURIComponent(obsId)}`, { method: 'DELETE' });
+      const res  = await fetch(`api/member-detail/${encodeURIComponent(profileId)}/observations/${encodeURIComponent(obsId)}`, { method: 'DELETE' });
       const data = await res.json();
       if (data.success) {
         document.getElementById(`obs-${obsId}`)?.remove();
@@ -511,7 +511,7 @@
     if (!confirm('Delete this summary?')) return;
     btn.disabled = true;
     try {
-      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}/summaries/${encodeURIComponent(sumId)}`, { method: 'DELETE' });
+      const res  = await fetch(`api/member-detail/${encodeURIComponent(profileId)}/summaries/${encodeURIComponent(sumId)}`, { method: 'DELETE' });
       const data = await res.json();
       if (data.success) {
         document.getElementById(`sum-${sumId}`)?.remove();
@@ -554,7 +554,7 @@
 
   async function loadTraits() {
     try {
-      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}/traits`);
+      const res  = await fetch(`api/member-detail/${encodeURIComponent(profileId)}/traits`);
       const data = await res.json();
       renderTraitGroup('traitsContact',  'Contact',  data.contact  || {});
       renderTraitGroup('traitsOutreach', 'outreach', data.outreach || {});
@@ -589,7 +589,7 @@
     const value = input.value;
     btn.disabled = true; btn.textContent = '…';
     try {
-      const res  = await fetch(`http://localhost:8001/api/member-detail/${encodeURIComponent(profileId)}/traits`, {
+      const res  = await fetch(`api/member-detail/${encodeURIComponent(profileId)}/traits`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ group, key, value }),
@@ -611,7 +611,7 @@
     const orig = btn.innerHTML;
     btn.disabled = true; btn.textContent = '⏳';
     try {
-      const res  = await fetch('http://localhost:8001/api/outbound-call', {
+      const res  = await fetch('api/outbound-call', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -670,7 +670,7 @@
     btn.disabled = true;
     btn.textContent = '⏳ Transferring…';
     try {
-      const res = await fetch('http://localhost:8001/api/escalate-call', {
+      const res = await fetch('api/escalate-call', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profileId, reason: 'care_team_requested' }),
@@ -692,7 +692,7 @@
 
   async function initTwilioDevice() {
     if (twilioDevice) return twilioDevice;
-    const res  = await fetch('http://localhost:8001/api/browser-call-token');
+    const res  = await fetch('api/browser-call-token');
     const data = await res.json();
     if (!data.token) throw new Error('No token returned');
     const device = new Twilio.Device(data.token, { logLevel: 1 });
@@ -725,7 +725,7 @@
         showToast(`Connected to ${memberData.name}`, 'success');
       });
       // Place outbound call via REST API — CO captures it; when answered bridges to this browser
-      const res  = await fetch('http://localhost:8001/api/browser-call', {
+      const res  = await fetch('api/browser-call', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: memberData.phone, profileId, name: memberData.name }),
@@ -744,6 +744,7 @@
     { category_key: 'Greetings',           criteria: [{ criteria_key: 'Required Phrase' }] },
     { category_key: 'Verification',        criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }, { criteria_key: 'Required Phrase' }] },
     { category_key: 'Symptom Deep-Dive',   criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
+    { category_key: 'Red Flag Symptom (Call 911)',   criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
     { category_key: 'Empathy',             criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
     { category_key: 'Wrap Up',             criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
   ];
@@ -753,7 +754,7 @@
 
   function startTranscriptSSE() {
     if (transcriptSse) transcriptSse.close();
-    transcriptSse = new EventSource(`http://localhost:8001/api/transcript/${encodeURIComponent(profileId)}/stream`);
+    transcriptSse = new EventSource(`api/transcript/${encodeURIComponent(profileId)}/stream`);
     transcriptSse.onopen = () => {
       document.getElementById('transcriptDot').classList.add('active');
       document.getElementById('transcriptStatus').textContent = 'Connected — waiting for messages…';
@@ -769,7 +770,7 @@
 
   function clearTranscript() {
     document.getElementById('transcriptThread').innerHTML = '';
-    fetch(`http://localhost:8001/api/transcript/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
+    fetch(`api/transcript/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
   }
 
   function appendTranscriptMessage({ role, text, ts }) {
@@ -792,7 +793,7 @@
     if (sseSource) sseSource.close();
     const dot      = document.getElementById('liveDot');
     const statusTx = document.getElementById('liveStatusText');
-    sseSource = new EventSource(`http://localhost:8001/api/ci-results/${encodeURIComponent(profileId)}/stream`);
+    sseSource = new EventSource(`api/ci-results/${encodeURIComponent(profileId)}/stream`);
 
     sseSource.onopen = () => {
       dot.classList.add('active');
@@ -826,8 +827,13 @@
 
       let bodyHtml = isAdherence ? '' : `<div class="live-card-empty">Waiting for result…</div>`;
       if (isAdherence) {
-        const cats = (r && r.json && r.json.categories) ? r.json.categories : ADHERENCE_DEFAULT;
+        // Merge CI results with ADHERENCE_DEFAULT so manually-added categories
+        // (e.g. "Red Flag Symptom") always appear even if absent from CI response.
         const hasResults = !!(r && r.json && r.json.categories);
+        const resultCats = hasResults ? r.json.categories : [];
+        const resultKeys = new Set(resultCats.map(c => c.category_key));
+        const missingDefaults = ADHERENCE_DEFAULT.filter(c => !resultKeys.has(c.category_key));
+        const cats = hasResults ? [...resultCats, ...missingDefaults] : ADHERENCE_DEFAULT;
         bodyHtml = `<div class="adherence-list">${cats.map(cat => {
           const isMet   = (v) => v === 'Passed' || v === 'Succeeded';
           const allMet  = hasResults && cat.criteria.length > 0 && cat.criteria.every(c => isMet(c.criteria_met));
@@ -863,7 +869,7 @@
   if (!profileId) {
     document.querySelector('main').innerHTML = '<p style="padding:40px;color:var(--text-muted)">No profile ID provided.</p>';
   } else {
-    fetch(`http://localhost:8001/api/ci-results/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
+    fetch(`api/ci-results/${encodeURIComponent(profileId)}`, { method: 'DELETE' });
     loadProfile();
     loadDetail();
     startSSE();

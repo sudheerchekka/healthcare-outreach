@@ -457,7 +457,7 @@
     btn.disabled = true;
     btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg> Resetting…`;
     try {
-      const res = await fetch('http://localhost:8001/api/reset-conversations', {
+      const res = await fetch('api/reset-conversations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -482,7 +482,7 @@
     showState('loading');
 
     try {
-      const res = await fetch('http://localhost:8001/api/members');
+      const res = await fetch('api/members');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       members = (data.members || []).sort((a, b) => a.name.localeCompare(b.name));
@@ -648,7 +648,7 @@
     btn.textContent = '⏳';
 
     try {
-      const res = await fetch('http://localhost:8001/api/outbound-call', {
+      const res = await fetch('api/outbound-call', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -682,7 +682,7 @@
     btn.textContent = '⏳';
 
     try {
-      const res = await fetch('http://localhost:8001/api/reset-member', {
+      const res = await fetch('api/reset-member', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile_id: m.profile_id }),
@@ -761,7 +761,7 @@
     if (!body) return;
     btn.disabled = true; btn.textContent = 'Sending…';
     try {
-      const res = await fetch('http://localhost:8001/api/send-sms', {
+      const res = await fetch('api/send-sms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: smsMember.name, phone: smsMember.phone, customBody: body }),
@@ -791,8 +791,8 @@
 
   async function loadPrompt() {
     const [outRes, inRes] = await Promise.allSettled([
-      fetch('http://localhost:8001/api/admin/system-prompt'),
-      fetch('http://localhost:8001/api/admin/system-prompt-inbound'),
+      fetch('api/admin/system-prompt'),
+      fetch('api/admin/system-prompt-inbound'),
     ]);
     const ta  = document.getElementById('promptTextarea');
     const tai = document.getElementById('promptInboundTextarea');
@@ -802,12 +802,12 @@
 
   async function savePrompt() {
     await _savePromptTo('btnSavePrompt', 'promptTextarea',
-      'http://localhost:8001/api/admin/system-prompt', 'Outbound prompt saved');
+      'api/admin/system-prompt', 'Outbound prompt saved');
   }
 
   async function saveInboundPrompt() {
     await _savePromptTo('btnSaveInboundPrompt', 'promptInboundTextarea',
-      'http://localhost:8001/api/admin/system-prompt-inbound', 'Inbound prompt saved');
+      'api/admin/system-prompt-inbound', 'Inbound prompt saved');
   }
 
   async function _savePromptTo(btnId, taId, url, successMsg) {

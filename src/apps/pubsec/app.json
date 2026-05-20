@@ -1,0 +1,23 @@
+{
+  "id": "pubsec",
+  "display_name": "Public Services",
+  "route_prefix": "/pubsec",
+  "tac_route_prefix": "/pubsec",
+  "account_sid_env": "TWILIO_TAC_ACCOUNT_SID",
+  "auth_token_env": "TWILIO_TAC_AUTH_TOKEN",
+  "api_key_env": "TWILIO_API_KEY",
+  "api_token_env": "TWILIO_API_TOKEN",
+  "phone_number_env": "PUBSEC_PHONE_NUMBER",
+  "memory_store_env": "PUBSEC_MEMORY_STORE_ID",
+  "outbound_call_to_env": "PUBSEC_OUTBOUND_CALL_TO",
+  "voice_domain_env": "VOICE_PUBLIC_DOMAIN",
+  "ci_summary_operator_env": "PUBSEC_CI_SUMMARY_OPERATOR_SID",
+  "ci_outreach_operator_env": "PUBSEC_CI_OUTREACH_OPERATOR_SID",
+  "sms_write_observation_env": "PUBSEC_SMS_WRITE_OBSERVATION",
+  "ci_operators": [
+    { "sid_env": "PUBSEC_CI_OPERATOR_1_SID", "label_env": "PUBSEC_CI_OPERATOR_1_LABEL", "default_label": "Operator 1" },
+    { "sid_env": "PUBSEC_CI_OPERATOR_2_SID", "label_env": "PUBSEC_CI_OPERATOR_2_LABEL", "default_label": "Operator 2" },
+    { "sid_env": "PUBSEC_CI_OPERATOR_3_SID", "label_env": "PUBSEC_CI_OPERATOR_3_LABEL", "default_label": "Operator 3" },
+    { "sid_env": "PUBSEC_CI_OPERATOR_4_SID", "label_env": "PUBSEC_CI_OPERATOR_4_LABEL", "default_label": "Operator 4" }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "id": "healthcare",
+  "display_name": "Owl Health",
+  "route_prefix": "/healthcare",
+  "tac_route_prefix": "/healthcare",
+  "account_sid_env": "TWILIO_TAC_ACCOUNT_SID",
+  "auth_token_env": "TWILIO_TAC_AUTH_TOKEN",
+  "api_key_env": "TWILIO_API_KEY",
+  "api_token_env": "TWILIO_API_TOKEN",
+  "phone_number_env": "TWILIO_TAC_PHONE_NUMBER",
+  "memory_store_env": "MEMORY_STORE_ID",
+  "outbound_call_to_env": "OUTBOUND_CALL_TO",
+  "voice_domain_env": "VOICE_PUBLIC_DOMAIN",
+  "ci_summary_operator_env": "TWILIO_TAC_CI_SUMMARY_OPERATOR_SID",
+  "ci_outreach_operator_env": "TWILIO_TAC_CI_OUTREACH_OPERATOR_SID",
+  "sms_write_observation_env": "SMS_WRITE_OBSERVATION",
+  "ci_operators": [
+    { "sid_env": "CI_OPERATOR_1_SID", "label_env": "CI_OPERATOR_1_LABEL", "default_label": "Operator 1" },
+    { "sid_env": "CI_OPERATOR_2_SID", "label_env": "CI_OPERATOR_2_LABEL", "default_label": "Operator 2" },
+    { "sid_env": "CI_OPERATOR_3_SID", "label_env": "CI_OPERATOR_3_LABEL", "default_label": "Operator 3" },
+    { "sid_env": "CI_OPERATOR_4_SID", "label_env": "CI_OPERATOR_4_LABEL", "default_label": "Operator 4" }
+  ]
+}

@@ -1,19 +1,11 @@
 """
-Owl Health Python TAC Server.
+Multi-app Python TAC Server.
 
-Bridges Twilio ConversationRelay to AgentCore via persistent WebSocket.
-Uses AgentCoreRuntimeClient.generate_presigned_url() for per-session WebSocket
-pooling — eliminating per-turn HTTP overhead from the Node.js implementation.
+Supports multiple apps (healthcare, pubsec, etc.) on one server.
+Each app is configured via src/tac/apps/<id>.json and gets its own
+URL-prefixed routes: /{app}/twiml, /{app}/ws, /{app}/sms, etc.
 
-Endpoints:
-  POST /twiml                       — TwiML for inbound calls
-  POST /twiml-outbound              — TwiML for outbound calls (personalized greeting)
-  WS   /ws                          — ConversationRelay WebSocket
-  POST /conversation-relay-callback — Call-end webhook
-  POST /set-outbound-context        — IPC: Node.js app server stores pending ctx before dial
-  GET  /get-outbound-phone/{conv_id} — IPC: Node.js CI webhook looks up member phone
-  POST /escalate-call               — IPC: Transfer active call to Flex human agent queue
-  GET  /health                      — Health check
+Shared routes (no prefix): /health, /get-outbound-phone/{conv_id}, /ci-webhook
 """
 
 # Patch importlib.metadata.version before any tac imports.
@@ -44,7 +36,7 @@ import websockets
 from base64 import b64encode
 from xml.sax.saxutils import escape
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request
 from fastapi.responses import Response
 
 from bedrock_agentcore.runtime import AgentCoreRuntimeClient
@@ -72,72 +64,330 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 # Configuration
 # ---------------------------------------------------------------------------
 
-AGENTCORE_RUNTIME_ARN = os.environ.get("VOICE_CONCIERGE_RUNTIME_ARN") or ""
+MEMORY_BASE = "https://memory.twilio.com"
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 PUBLIC_DOMAIN = (os.environ.get("VOICE_PUBLIC_DOMAIN") or "").lstrip("https://").lstrip("http://")
 TAC_PORT = int(os.environ.get("TAC_PORT", "8000"))
 APP_PORT = int(os.environ.get("APP_PORT", "8001"))
 
-# Local dev: set AGENT_LOCAL_URL=http://localhost:8080 to bypass presigned URL and
-# connect directly to agentcore dev server. Unset (or empty) = use deployed AgentCore.
-AGENT_LOCAL_URL = os.environ.get("AGENT_LOCAL_URL", "").rstrip("/")
-AGENT_LOCAL_WS_URL = AGENT_LOCAL_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws" if AGENT_LOCAL_URL else ""
-
-AGENT_BACKEND = os.environ.get("AGENT_BACKEND", "agentcore")  # "agentcore" | "elevenlabs"
-EL_PORT       = int(os.environ.get("ELEVENLABS_PORT", "8002"))
-EL_BASE       = f"http://localhost:{EL_PORT}"
-
-MEMORY_BASE = "https://memory.twilio.com"
-MEMORY_STORE_ID = os.environ.get("MEMORY_STORE_ID", "")
-MEMORY_API_KEY = os.environ.get("TWILIO_API_KEY", "")
-MEMORY_API_TOKEN = os.environ.get("TWILIO_API_TOKEN", "")
-
-PHONE_NUMBER = os.environ.get("TWILIO_TAC_PHONE_NUMBER", "")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_TAC_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_TAC_AUTH_TOKEN", "")
-SMS_WRITE_OBSERVATION = os.environ.get("SMS_WRITE_OBSERVATION", "false").lower() == "true"
-OUTBOUND_CALL_TO = os.environ.get("OUTBOUND_CALL_TO", "")
-SMS_SIMULATE_MEMBER_PHONE = os.environ.get("SMS_SIMULATE_MEMBER_PHONE", "")
-
 ESCALATION_ENABLED = os.environ.get("ESCALATION_ENABLED", "false").lower() in ("1", "true", "yes")
 FLEX_HANDOFF_APPLICATION_SID = os.environ.get("TWILIO_FLEX_HANDOFF_APPLICATION_SID", "")
-FLEX_DEFAULT_QUEUE = os.environ.get("TWILIO_FLEX_DEFAULT_QUEUE", "healthcare")
-FLEX_ESCALATION_ANNOUNCEMENT = os.environ.get(
-    "TWILIO_FLEX_ESCALATION_ANNOUNCEMENT",
-    "Of course! Let me connect you with one of our care specialists right away. Please hold for just a moment.",
-)
 
 from twilio.rest import Client as TwilioClient
 twilio_client: Optional[TwilioClient] = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID else None
 
-# AgentCore presigned-URL WebSocket client
-agentcore_client: Optional[AgentCoreRuntimeClient] = None
-if AGENTCORE_RUNTIME_ARN:
-    agentcore_client = AgentCoreRuntimeClient(region=AWS_REGION)
-else:
-    logger.warning("VOICE_CONCIERGE_RUNTIME_ARN not set — AgentCore calls will fail")
-
-# TAC + VoiceChannel (memory retrieval disabled; we fetch it ourselves)
+# TAC (memory retrieval disabled; we fetch it ourselves)
 tac = TAC(config=TACConfig.from_env())
 
+
+@dataclass
+class AppConfig:
+    id: str
+    display_name: str
+    route_prefix: str
+    phone_number: str
+    agent_backend_name: str       # "agentcore" | "vertexai" | "elevenlabs"
+    agent_local_ws_url: str
+    agentcore_arn: str
+    vertexai_project: str
+    vertexai_location: str
+    vertexai_agent_id: str
+    el_port: int
+    memory_store_id: str
+    memory_api_key: str
+    memory_api_token: str
+    flex_queue: str
+    flex_escalation_announcement: str
+    inbound_greeting: str
+    default_outbound_greeting: str
+    outbound_system_prompt_prefix: str
+    system_prompt_inbound_file: str
+    system_prompt_sms_file: str
+    default_inbound_prompt: str
+    sms_write_observation: bool
+    outbound_call_to: str
+    sms_simulate_member_phone: str
+
+
+def _load_app_configs() -> dict[str, "AppConfig"]:
+    """Load all app configs from src/tac/apps/*.json, keyed by route_prefix."""
+    apps: dict[str, AppConfig] = {}
+    apps_dir = pathlib.Path(__file__).parent / "apps"
+    for cfg_file in sorted(apps_dir.glob("*.json")):
+        try:
+            raw = json.loads(cfg_file.read_text())
+            ev = os.environ.get  # shorthand
+
+            agent_local_url = ev(raw.get("agent_local_url_env", ""), "").rstrip("/")
+            agent_local_ws_url = (
+                agent_local_url.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
+                if agent_local_url else ""
+            )
+
+            cfg = AppConfig(
+                id=raw["id"],
+                display_name=raw["display_name"],
+                route_prefix=raw["route_prefix"].rstrip("/"),
+                phone_number=ev(raw.get("phone_number_env", ""), ""),
+                agent_backend_name=ev(raw.get("agent_backend_env", ""), "agentcore"),
+                agent_local_ws_url=agent_local_ws_url,
+                agentcore_arn=ev(raw.get("agentcore_arn_env", ""), ""),
+                vertexai_project=ev(raw.get("vertexai_project_env", ""), ""),
+                vertexai_location=ev(raw.get("vertexai_location_env", ""), "us-central1"),
+                vertexai_agent_id=ev(raw.get("vertexai_agent_id_env", ""), ""),
+                el_port=int(ev(raw.get("elevenlabs_port_env", ""), "8002") or "8002"),
+                memory_store_id=ev(raw.get("memory_store_env", ""), ""),
+                memory_api_key=ev(raw.get("memory_api_key_env", ""), ""),
+                memory_api_token=ev(raw.get("memory_api_token_env", ""), ""),
+                flex_queue=raw.get("flex_queue", raw["id"]),
+                flex_escalation_announcement=raw.get("flex_escalation_announcement", "Please hold while I connect you."),
+                inbound_greeting=raw.get("inbound_greeting", "Hello! How can I assist you today?"),
+                default_outbound_greeting=raw.get("default_outbound_greeting", "Hello!"),
+                outbound_system_prompt_prefix=raw.get("outbound_system_prompt_prefix", "You are calling {name}."),
+                system_prompt_inbound_file=raw.get("system_prompt_inbound_file", "system_prompt_inbound.txt"),
+                system_prompt_sms_file=raw.get("system_prompt_sms_file", "system_prompt_sms.txt"),
+                default_inbound_prompt=raw.get("default_inbound_prompt", "You are a helpful assistant."),
+                sms_write_observation=ev(raw.get("sms_write_observation_env", ""), "false").lower() == "true",
+                outbound_call_to=ev(raw.get("outbound_call_to_env", ""), ""),
+                sms_simulate_member_phone=ev(raw.get("sms_simulate_member_phone_env", ""), ""),
+            )
+            apps[cfg.route_prefix] = cfg
+            logger.info(f"[config] loaded app id={cfg.id} prefix={cfg.route_prefix} backend={cfg.agent_backend_name}")
+        except Exception as e:
+            logger.error(f"[config] failed to load {cfg_file.name}: {e}")
+    if not apps:
+        logger.error("[config] no app configs found in src/tac/apps/ — server will have no routes")
+    return apps
+
+
+ALL_APPS = _load_app_configs()
+# Reverse lookup: phone_number → AppConfig (for inbound call routing)
+_PHONE_TO_APP: dict[str, AppConfig] = {
+    cfg.phone_number: cfg for cfg in ALL_APPS.values() if cfg.phone_number
+}
+
 # ---------------------------------------------------------------------------
-# State
+# Agent backend abstraction
 # ---------------------------------------------------------------------------
 
-agent_connections: dict[str, websockets.ClientConnection] = {}
-agent_connection_times: dict[str, float] = {}  # session_id → time.time() when connected
-_AGENTCORE_WS_TTL = 270  # presigned URLs expire at 300s; reconnect before that
+class AgentCoreBackend:
+    """AWS AgentCore backend — persistent presigned WebSocket per session."""
+
+    _WS_TTL = 270  # presigned URLs expire at 300s; reconnect before that
+
+    def __init__(self, cfg: "AppConfig") -> None:
+        self._cfg = cfg
+        self._connections: dict[str, websockets.ClientConnection] = {}
+        self._connection_times: dict[str, float] = {}
+        self._client: Optional[AgentCoreRuntimeClient] = None
+        if cfg.agentcore_arn:
+            self._client = AgentCoreRuntimeClient(region=AWS_REGION)
+        else:
+            logger.warning(f"[{cfg.id}] agentcore_arn not set — AgentCore calls will fail")
+
+    async def get_or_create_ws(self, session_id: str) -> Optional[websockets.ClientConnection]:
+        if session_id in self._connections:
+            ws = self._connections[session_id]
+            age = time.time() - self._connection_times.get(session_id, 0)
+            if ws.state.name == "OPEN" and age < self._WS_TTL:
+                return ws
+            logger.info(f"[{self._cfg.id}][agentcore] evicting session_id={session_id} age={age:.0f}s")
+            del self._connections[session_id]
+            self._connection_times.pop(session_id, None)
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+        try:
+            t0 = time.time()
+            if self._cfg.agent_local_ws_url:
+                url = self._cfg.agent_local_ws_url
+                logger.info(f"[{self._cfg.id}][agentcore] local dev connecting to {url}")
+            else:
+                if not self._client:
+                    logger.error(f"[{self._cfg.id}][agentcore] no client and agent_local_url not set")
+                    return None
+                url = self._client.generate_presigned_url(
+                    runtime_arn=self._cfg.agentcore_arn,
+                    session_id=session_id,
+                )
+            import ssl as _ssl
+            _ssl_ctx = _ssl.create_default_context()
+            _ssl_ctx.check_hostname = False
+            _ssl_ctx.verify_mode = _ssl.CERT_NONE
+            ws = await websockets.connect(url, ssl=_ssl_ctx)
+            self._connections[session_id] = ws
+            self._connection_times[session_id] = time.time()
+            logger.info(f"[{self._cfg.id}][agentcore] connected session_id={session_id} in {(time.time()-t0)*1000:.0f}ms")
+            return ws
+        except Exception as e:
+            logger.error(f"[{self._cfg.id}][agentcore] connection failed: {e}")
+            return None
+
+    async def prewarm(self, session_id: str) -> bool:
+        ws = await self.get_or_create_ws(session_id)
+        return ws is not None
+
+    async def invoke(self, session_id: str, prompt: str, system_prompt: str, context: str,
+                     member_phone: str = "", profile_id: str = "",
+                     member_traits: Optional[dict] = None) -> AsyncGenerator[dict, None]:
+        ws = await self.get_or_create_ws(session_id)
+        if not ws:
+            raise RuntimeError(f"[{self._cfg.id}] Could not connect to AgentCore")
+        await ws.send(json.dumps({
+            "type": "prompt",
+            "voicePrompt": prompt,
+            "systemPrompt": system_prompt,
+            "memoryContext": context,
+        }))
+        async for raw in ws:
+            data = json.loads(raw)
+            yield data
+            if data.get("type") == "text" and data.get("last"):
+                break
+
+    async def interrupt(self, session_id: str, utterance: str) -> None:
+        ws = self._connections.get(session_id)
+        if ws:
+            try:
+                await ws.send(json.dumps({"type": "interrupt", "utterance_until_interrupt": utterance}))
+            except Exception:
+                pass
+
+    async def close_session(self, session_id: str) -> None:
+        ws = self._connections.pop(session_id, None)
+        self._connection_times.pop(session_id, None)
+        if ws:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+
+class VertexAIBackend:
+    """Google Vertex AI Agent Engine backend — REST streaming per turn, server-side sessions."""
+
+    def __init__(self, cfg: "AppConfig") -> None:
+        self._cfg = cfg
+        self._agent = None
+        self._initialized = False
+
+    def _get_agent(self):
+        if self._initialized:
+            return self._agent
+        self._initialized = True
+        if not self._cfg.vertexai_project or not self._cfg.vertexai_agent_id:
+            logger.error(f"[{self._cfg.id}][vertexai] vertexai_project and vertexai_agent_id must be set")
+            return None
+        try:
+            import vertexai
+            from vertexai import agent_engines
+            vertexai.init(project=self._cfg.vertexai_project, location=self._cfg.vertexai_location)
+            self._agent = agent_engines.get(self._cfg.vertexai_agent_id)
+            logger.info(f"[{self._cfg.id}][vertexai] initialized agent={self._cfg.vertexai_agent_id}")
+        except Exception as e:
+            logger.error(f"[{self._cfg.id}][vertexai] init failed: {e}")
+            self._agent = None
+        return self._agent
+
+    async def prewarm(self, session_id: str) -> bool:
+        loop = asyncio.get_event_loop()
+        agent = await loop.run_in_executor(None, self._get_agent)
+        return agent is not None
+
+    async def invoke(self, session_id: str, prompt: str, system_prompt: str, context: str,
+                     member_phone: str = "", profile_id: str = "",
+                     member_traits: Optional[dict] = None) -> AsyncGenerator[dict, None]:
+        loop = asyncio.get_event_loop()
+        agent = await loop.run_in_executor(None, self._get_agent)
+        if not agent:
+            raise RuntimeError(f"[{self._cfg.id}] Could not connect to Vertex AI Agent Engine")
+
+        full_prompt = prompt
+        if system_prompt or context:
+            parts = [p for p in [system_prompt, context, prompt] if p]
+            full_prompt = "\n\n".join(parts)
+
+        def _stream():
+            return list(agent.stream_query(
+                user_id=session_id,
+                message=full_prompt,
+                session_id=session_id,
+            ))
+
+        t0 = time.time()
+        events = await loop.run_in_executor(None, _stream)
+        logger.info(f"[{self._cfg.id}][vertexai] stream complete session_id={session_id} events={len(events)} in {(time.time()-t0)*1000:.0f}ms")
+
+        full_text = ""
+        for event in events:
+            if hasattr(event, "content") and hasattr(event.content, "parts"):
+                for part in event.content.parts:
+                    if hasattr(part, "text") and part.text:
+                        full_text += part.text
+            elif hasattr(event, "text") and event.text:
+                full_text += event.text
+
+        clean_lines = []
+        for line in full_text.splitlines():
+            if line.startswith("__SIGNAL__"):
+                try:
+                    yield json.loads(line[len("__SIGNAL__"):])
+                except Exception:
+                    logger.warning(f"[{self._cfg.id}][vertexai] malformed signal line: {line[:200]}")
+            else:
+                clean_lines.append(line)
+        clean_text = "\n".join(clean_lines).strip()
+
+        if clean_text:
+            for word in clean_text.split(" "):
+                yield {"type": "text", "token": word + " ", "last": False}
+        yield {"type": "text", "token": "", "last": True}
+
+    async def interrupt(self, session_id: str, utterance: str) -> None:
+        pass
+
+    async def close_session(self, session_id: str) -> None:
+        pass
+
+
+def _make_backend(cfg: "AppConfig") -> AgentCoreBackend | VertexAIBackend:
+    if cfg.agent_backend_name == "vertexai":
+        logger.info(f"[{cfg.id}] agent provider: Vertex AI (Gemini)")
+        return VertexAIBackend(cfg)
+    logger.info(f"[{cfg.id}] agent provider: AWS AgentCore")
+    return AgentCoreBackend(cfg)
+
+
+# Per-app backend instances
+_APP_BACKENDS: dict[str, AgentCoreBackend | VertexAIBackend] = {
+    prefix: _make_backend(cfg) for prefix, cfg in ALL_APPS.items()
+}
+
+# ---------------------------------------------------------------------------
+# State  (all global dicts; conv_id keys are unique across apps)
+# ---------------------------------------------------------------------------
 pending_outbound_context: dict[str, dict] = {}
-outbound_conversation_map: dict[str, str] = {}
+outbound_conversation_map: dict[str, dict] = {}
 conversation_call_sid_map: dict[str, str] = {}
 pending_call_sid_map: dict[str, str] = {}
 system_prompt_cache: dict[str, str] = {}
 greeting_cache: dict[str, str] = {}
 memory_context_cache: dict[str, str] = {}
+# Maps conv_id → route_prefix so shared endpoints can find the right app
+conv_app_map: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
 # Escalation helpers
 # ---------------------------------------------------------------------------
+
+def _app_for_conv(conv_id: str) -> Optional["AppConfig"]:
+    prefix = conv_app_map.get(conv_id)
+    return ALL_APPS.get(prefix) if prefix else None
+
 
 def _twilio_basic_auth_header() -> dict[str, str]:
     creds = f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}".encode("utf-8")
@@ -169,7 +419,9 @@ def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_q
 
 
 async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target_queue: str) -> bool:
-    logger.info(f"[escalation] attempt conv_id={conv_id} reason={reason} urgency={urgency} queue={target_queue} enabled={ESCALATION_ENABLED} app_sid={FLEX_HANDOFF_APPLICATION_SID or '(not set)'}")
+    app_cfg = _app_for_conv(conv_id)
+    effective_queue = target_queue or (app_cfg.flex_queue if app_cfg else "default")
+    logger.info(f"[escalation] attempt conv_id={conv_id} reason={reason} urgency={urgency} queue={effective_queue} enabled={ESCALATION_ENABLED} app_sid={FLEX_HANDOFF_APPLICATION_SID or '(not set)'}")
     if not ESCALATION_ENABLED:
         logger.warning(f"[escalation] ESCALATION_ENABLED=false — set to true in .env and restart")
         return False
@@ -208,7 +460,7 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
             member_phone = ctx.get("phone", "")
     logger.info(f"[escalation] resolved member_phone={member_phone or '(unknown)'} member_name={member_name or '(unknown)'} member_profile_id={member_profile_id or '(unknown)'}")
 
-    twiml = _build_flex_transfer_twiml(conv_id, reason, urgency, target_queue,
+    twiml = _build_flex_transfer_twiml(conv_id, reason, urgency, effective_queue,
                                        member_phone=member_phone,
                                        member_name=member_name,
                                        member_profile_id=member_profile_id)
@@ -228,7 +480,7 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
         if res.status_code >= 300:
             logger.error(f"[escalation] Twilio update failed status={res.status_code} conv_id={conv_id}")
             return False
-        logger.info(f"[escalation] ✓ transferred conv_id={conv_id} call_sid={call_sid} reason={reason} urgency={urgency} queue={target_queue or FLEX_DEFAULT_QUEUE}")
+        logger.info(f"[escalation] ✓ transferred conv_id={conv_id} call_sid={call_sid} reason={reason} urgency={urgency} queue={effective_queue}")
         try:
             await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
             logger.info(f"[escalation] closed Maestro conversation convId={conv_id}")
@@ -244,27 +496,27 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
 # TAC Memory helpers
 # ---------------------------------------------------------------------------
 
-def _lookup_profile_id(phone: str) -> Optional[str]:
+def _lookup_profile_id(phone: str, cfg: "AppConfig") -> Optional[str]:
     try:
         res = requests.post(
-            f"{MEMORY_BASE}/v1/Stores/{MEMORY_STORE_ID}/Profiles/Lookup",
+            f"{MEMORY_BASE}/v1/Stores/{cfg.memory_store_id}/Profiles/Lookup",
             json={"idType": "phone", "value": phone},
-            auth=(MEMORY_API_KEY, MEMORY_API_TOKEN),
+            auth=(cfg.memory_api_key, cfg.memory_api_token),
             timeout=5,
         )
         profiles = res.json().get("profiles", [])
         return profiles[0] if profiles else None
     except Exception as e:
-        logger.warning(f"[memory] lookupProfileId failed: {e}")
+        logger.warning(f"[{cfg.id}][memory] lookupProfileId failed: {e}")
         return None
 
 
-def _fetch_profile_traits(profile_id: str) -> dict:
+def _fetch_profile_traits(profile_id: str, cfg: "AppConfig") -> dict:
     """Fetch contact + outreach traits for a profile."""
     try:
         res = requests.get(
-            f"{MEMORY_BASE}/v1/Stores/{MEMORY_STORE_ID}/Profiles/{profile_id}",
-            auth=(MEMORY_API_KEY, MEMORY_API_TOKEN),
+            f"{MEMORY_BASE}/v1/Stores/{cfg.memory_store_id}/Profiles/{profile_id}",
+            auth=(cfg.memory_api_key, cfg.memory_api_token),
             timeout=5,
         )
         data = res.json()
@@ -292,10 +544,10 @@ def _fetch_profile_traits(profile_id: str) -> dict:
         return {}
 
 
-def _fetch_memory(profile_id: str) -> Optional[TACMemoryResponse]:
+def _fetch_memory(profile_id: str, cfg: "AppConfig") -> Optional[TACMemoryResponse]:
     try:
-        base = f"{MEMORY_BASE}/v1/Stores/{MEMORY_STORE_ID}/Profiles/{profile_id}"
-        auth = (MEMORY_API_KEY, MEMORY_API_TOKEN)
+        base = f"{MEMORY_BASE}/v1/Stores/{cfg.memory_store_id}/Profiles/{profile_id}"
+        auth = (cfg.memory_api_key, cfg.memory_api_token)
         obs_res = requests.get(f"{base}/Observations", auth=auth, timeout=5)
         sum_res = requests.get(f"{base}/ConversationSummaries", auth=auth, timeout=5)
         observations = [type("Obs", (), {"content": o["content"]})() for o in (obs_res.json() or {}).get("observations") or []]
@@ -306,27 +558,26 @@ def _fetch_memory(profile_id: str) -> Optional[TACMemoryResponse]:
         return None
 
 
-async def _prefetch_memory(phone: str, profile_id: Optional[str] = None) -> tuple[Optional[TACMemoryResponse], dict]:
-    """Run blocking memory + traits fetch in thread pool. Returns (memory, traits).
-    Pass profile_id to skip the lookup when it's already known."""
+async def _prefetch_memory(phone: str, cfg: "AppConfig", profile_id: Optional[str] = None) -> tuple[Optional[TACMemoryResponse], dict]:
+    """Run blocking memory + traits fetch in thread pool. Returns (memory, traits)."""
     loop = asyncio.get_event_loop()
     t0 = time.time()
     try:
         if not profile_id:
-            profile_id = await loop.run_in_executor(None, _lookup_profile_id, phone)
+            profile_id = await loop.run_in_executor(None, _lookup_profile_id, phone, cfg)
         if profile_id:
             memory, traits = await asyncio.gather(
-                loop.run_in_executor(None, _fetch_memory, profile_id),
-                loop.run_in_executor(None, _fetch_profile_traits, profile_id),
+                loop.run_in_executor(None, _fetch_memory, profile_id, cfg),
+                loop.run_in_executor(None, _fetch_profile_traits, profile_id, cfg),
             )
         else:
             memory, traits = None, {}
         obs = len(memory.observations) if memory else 0
         sums = len(memory.summaries) if memory else 0
-        logger.info(f"[memory] prefetch phone={phone} profileId={profile_id or 'none'} obs={obs} summaries={sums} traits={len(traits)} in {(time.time()-t0)*1000:.0f}ms")
+        logger.info(f"[{cfg.id}][memory] prefetch phone={phone} profileId={profile_id or 'none'} obs={obs} summaries={sums} traits={len(traits)} in {(time.time()-t0)*1000:.0f}ms")
         return memory, traits
     except Exception as e:
-        logger.warning(f"[memory] prefetch error: {e}")
+        logger.warning(f"[{cfg.id}][memory] prefetch error: {e}")
         return None, {}
 
 
@@ -355,23 +606,21 @@ def _build_memory_context(memory: Optional[TACMemoryResponse], traits: Optional[
     return "The following is from previous interactions with this member.\n\n" + "\n\n".join(sections)
 
 
-async def _invoke_agentcore_ws(session_id: str, prompt: str, system_prompt: str, context: str,
-                               member_phone: str = "", profile_id: str = "", member_traits: Optional[dict] = None) -> str:
-    """Invoke AgentCore via WebSocket (reuses the pooled connection like voice calls)."""
-    agent_ws = await get_or_create_agent_ws(session_id)
-    if not agent_ws:
-        raise RuntimeError("Could not connect to AgentCore")
-
-    await agent_ws.send(json.dumps({
-        "type": "prompt",
-        "voicePrompt": prompt,
-        "systemPrompt": system_prompt,
-        "memoryContext": context,
-    }))
-
+async def _invoke_agent(session_id: str, prompt: str, system_prompt: str, context: str,
+                        cfg: "AppConfig", member_phone: str = "", profile_id: str = "",
+                        member_traits: Optional[dict] = None) -> str:
+    """Invoke the app's agent backend and return the full reply text."""
+    backend = _APP_BACKENDS[cfg.route_prefix]
     tokens: list[str] = []
-    async for raw in agent_ws:
-        data = json.loads(raw)
+    async for data in backend.invoke(
+        session_id=session_id,
+        prompt=prompt,
+        system_prompt=system_prompt,
+        context=context,
+        member_phone=member_phone,
+        profile_id=profile_id,
+        member_traits=member_traits,
+    ):
         msg_type = data.get("type")
         if msg_type == "text":
             token = data.get("token", "")
@@ -382,23 +631,15 @@ async def _invoke_agentcore_ws(session_id: str, prompt: str, system_prompt: str,
         elif msg_type == "schedule_call":
             sc_phone = str(data.get("phone", "")) or member_phone
             sc_reason = str(data.get("reason", ""))
-            logger.info(f"[schedule_call] sms: agent requested call profile_id={profile_id} phone={sc_phone} reason={sc_reason}")
-            asyncio.create_task(_trigger_outbound_call_by_profile(profile_id, sc_phone, sc_reason, traits=member_traits or {}))
+            logger.info(f"[{cfg.id}][schedule_call] sms: agent requested call profile_id={profile_id} phone={sc_phone} reason={sc_reason}")
+            asyncio.create_task(_trigger_outbound_call_by_profile(profile_id, sc_phone, sc_reason, cfg=cfg, traits=member_traits or {}))
         elif msg_type == "tool_start":
-            logger.info(f"[agentcore] sms tool_start tool={data.get('tool')}")
+            logger.info(f"[agent] sms tool_start tool={data.get('tool')}")
         elif msg_type == "tool_result":
-            logger.info(f"[agentcore] sms tool_result status={data.get('status')}")
+            logger.info(f"[agent] sms tool_result status={data.get('status')}")
         else:
-            logger.info(f"[agentcore] sms ws msg type={msg_type} data={str(data)[:200]}")
-
+            logger.info(f"[agent] sms msg type={msg_type} data={str(data)[:200]}")
     return "".join(tokens).strip()
-
-
-async def _invoke_agentcore_http(session_id: str, prompt: str, system_prompt: str, context: str,
-                                 member_phone: str = "", profile_id: str = "", member_traits: Optional[dict] = None) -> str:
-    """Invoke AgentCore via WebSocket (AgentCore only speaks WS, both local and deployed)."""
-    return await _invoke_agentcore_ws(session_id, prompt, system_prompt, context,
-                                      member_phone=member_phone, profile_id=profile_id, member_traits=member_traits)
 
 
 async def _trigger_outbound_call(conv_id: str, phone: str, reason: str) -> None:
@@ -406,16 +647,19 @@ async def _trigger_outbound_call(conv_id: str, phone: str, reason: str) -> None:
     map_entry = outbound_conversation_map.get(conv_id)
     name = map_entry.get("name", "Member") if isinstance(map_entry, dict) else "Member"
     profile_id = map_entry.get("profileId", "") if isinstance(map_entry, dict) else ""
-    await _trigger_outbound_call_by_profile(profile_id, phone, reason, name=name)
+    cfg = _app_for_conv(conv_id)
+    if cfg:
+        await _trigger_outbound_call_by_profile(profile_id, phone, reason, cfg=cfg, name=name)
 
 
-async def _trigger_outbound_call_by_profile(profile_id: str, phone: str, reason: str, name: str = "", traits: Optional[dict] = None) -> None:
+async def _trigger_outbound_call_by_profile(profile_id: str, phone: str, reason: str,
+                                             cfg: Optional["AppConfig"] = None,
+                                             name: str = "", traits: Optional[dict] = None) -> None:
     """Trigger outbound call using profile_id. Fetches profile traits if not provided."""
     t = traits or {}
-    # If no useful data, fetch directly from Memory Store
-    if not t and profile_id:
+    if not t and profile_id and cfg:
         loop = asyncio.get_event_loop()
-        t = await loop.run_in_executor(None, _fetch_profile_traits, profile_id)
+        t = await loop.run_in_executor(None, _fetch_profile_traits, profile_id, cfg)
         logger.info(f"[schedule_call] fetched traits for profile_id={profile_id} keys={list(t.keys())}")
     if not name:
         # _fetch_profile_traits returns flat keys: firstName, lastName (from Contact group)
@@ -439,7 +683,7 @@ async def _trigger_outbound_call_by_profile(profile_id: str, phone: str, reason:
         logger.error(f"[schedule_call] failed to trigger call: {e}", exc_info=True)
 
 
-async def _push_transcript_event(profile_id: str, role: str, text: str) -> None:
+async def _push_transcript_event(profile_id: str, role: str, text: str, route_prefix: str = "") -> None:
     try:
         async with httpx.AsyncClient() as client:
             await client.post(
@@ -451,127 +695,73 @@ async def _push_transcript_event(profile_id: str, role: str, text: str) -> None:
         logger.warning(f"[transcript] push failed role={role}: {e}")
 
 
-def _write_sms_observation(profile_id: str, role: str, content: str) -> None:
+def _write_sms_observation(profile_id: str, role: str, content: str, cfg: "AppConfig") -> None:
     from datetime import datetime
     obs_content = f"[SMS {role}] {content}"
     try:
         requests.post(
-            f"{MEMORY_BASE}/v1/Stores/{MEMORY_STORE_ID}/Profiles/{profile_id}/Observations",
+            f"{MEMORY_BASE}/v1/Stores/{cfg.memory_store_id}/Profiles/{profile_id}/Observations",
             json={"observations": [{"content": obs_content, "occurredAt": datetime.utcnow().isoformat() + "Z", "source": "sms-conversation"}]},
-            auth=(MEMORY_API_KEY, MEMORY_API_TOKEN),
+            auth=(cfg.memory_api_key, cfg.memory_api_token),
             timeout=5,
         )
     except Exception as e:
-        logger.warning(f"[sms] write observation failed: {e}")
+        logger.warning(f"[{cfg.id}][sms] write observation failed: {e}")
 
 
-def _build_system_prompt(name: str, goal: str, goal_desc: str) -> str:
+def _build_system_prompt(name: str, goal: str, goal_desc: str, cfg: "AppConfig") -> str:
+    prefix = cfg.outbound_system_prompt_prefix.format(name=name)
     lines = [
-        f"You are calling {name} on behalf of the Owl Health care team.",
+        prefix,
         f"The purpose of this call is: {goal}." if goal else "",
         f"Follow-up guidance: {goal_desc}" if goal_desc else "",
     ]
     return "\n".join(l for l in lines if l)
 
 
-_INBOUND_PROMPT_FILE = pathlib.Path(__file__).parent / "system_prompt_inbound.txt"
-_DEFAULT_INBOUND_PROMPT = (
-    "You are an Owl Health care coordination agent handling an inbound member call. "
-    "Be warm and conversational. Speak in plain, natural sentences — no bullet points, no bold or italic text. "
-    "Keep responses brief and easy to follow on a phone call. "
-    "Identify how you can help and guide the member toward a clear next step."
-)
-
-def _build_inbound_system_prompt() -> str:
-    if _INBOUND_PROMPT_FILE.exists():
-        text = _INBOUND_PROMPT_FILE.read_text().strip()
+def _build_inbound_system_prompt(cfg: "AppConfig") -> str:
+    prompt_file = pathlib.Path(__file__).parent / cfg.system_prompt_inbound_file
+    if prompt_file.exists():
+        text = prompt_file.read_text().strip()
         if text:
             return text
-    return _DEFAULT_INBOUND_PROMPT
+    return cfg.default_inbound_prompt
 
 
-_SMS_PROMPT_FILE = pathlib.Path(__file__).parent / "system_prompt_sms.txt"
-
-def _build_sms_system_prompt() -> str:
-    if _SMS_PROMPT_FILE.exists():
-        text = _SMS_PROMPT_FILE.read_text().strip()
+def _build_sms_system_prompt(cfg: "AppConfig") -> str:
+    sms_file = pathlib.Path(__file__).parent / cfg.system_prompt_sms_file
+    if sms_file.exists():
+        text = sms_file.read_text().strip()
         if text:
             return text
-    return _build_inbound_system_prompt()
+    return _build_inbound_system_prompt(cfg)
 
 
-# ---------------------------------------------------------------------------
-# AgentCore WebSocket pool
-# ---------------------------------------------------------------------------
-
-async def get_or_create_agent_ws(session_id: str) -> Optional[websockets.ClientConnection]:
-    if session_id in agent_connections:
-        ws = agent_connections[session_id]
-        age = time.time() - agent_connection_times.get(session_id, 0)
-        if ws.state.name == "OPEN" and age < _AGENTCORE_WS_TTL:
-            return ws
-        logger.info(f"[agentcore] evicting connection session_id={session_id} age={age:.0f}s state={ws.state.name}")
-        del agent_connections[session_id]
-        agent_connection_times.pop(session_id, None)
-        try:
-            await ws.close()
-        except Exception:
-            pass
-
-    try:
-        t0 = time.time()
-        if AGENT_LOCAL_WS_URL:
-            url = AGENT_LOCAL_WS_URL
-            logger.info(f"[agentcore] local dev connecting to {url}")
-        else:
-            if not agentcore_client:
-                logger.error("[agentcore] no client and AGENT_LOCAL_URL not set")
-                return None
-            url = agentcore_client.generate_presigned_url(
-                runtime_arn=AGENTCORE_RUNTIME_ARN,
-                session_id=session_id,
-            )
-        import ssl as _ssl
-        _ssl_ctx = _ssl.create_default_context()
-        _ssl_ctx.check_hostname = False
-        _ssl_ctx.verify_mode = _ssl.CERT_NONE
-        ws = await websockets.connect(url, ssl=_ssl_ctx)
-        agent_connections[session_id] = ws
-        agent_connection_times[session_id] = time.time()
-        logger.info(f"[agentcore] connected session_id={session_id} in {(time.time()-t0)*1000:.0f}ms")
-        return ws
-    except Exception as e:
-        logger.error(f"[agentcore] connection failed: {e}")
-        return None
-
-
-async def _prewarm(conv_id: str, session_id: str, phone: str) -> None:
-    """Pre-warm AgentCore WebSocket and fetch memory before the member speaks."""
+async def _prewarm(conv_id: str, session_id: str, phone: str, cfg: "AppConfig") -> None:
+    """Pre-warm agent backend and fetch memory before the member speaks."""
     t0 = time.time()
-    ws_task = asyncio.create_task(get_or_create_agent_ws(session_id))
-    mem_task = asyncio.create_task(_prefetch_memory(phone)) if phone else None
+    backend = _APP_BACKENDS[cfg.route_prefix]
+    prewarm_task = asyncio.create_task(backend.prewarm(session_id))
+    mem_task = asyncio.create_task(_prefetch_memory(phone, cfg)) if phone else None
 
-    ws = await ws_task
+    ok = await prewarm_task
     memory_result = await mem_task if mem_task else (None, {})
     memory, traits = memory_result if isinstance(memory_result, tuple) else (memory_result, {})
 
     if memory or traits:
         memory_context_cache[conv_id] = _build_memory_context(memory, traits)
 
-    logger.info(f"[prewarm] done conv_id={conv_id} ws={'ok' if ws else 'FAILED'} memory={'ok' if memory else 'none'} in {(time.time()-t0)*1000:.0f}ms")
+    logger.info(f"[{cfg.id}][prewarm] done conv_id={conv_id} backend={'ok' if ok else 'FAILED'} memory={'ok' if memory else 'none'} in {(time.time()-t0)*1000:.0f}ms")
 
 
 class OwlVoiceChannel(VoiceChannel):
-    """VoiceChannel subclass that always populates author_info from setup message,
-    maps our outbound conv_id to the Maestro conversation_id, and pre-warms the
-    AgentCore WebSocket + memory fetch before the member speaks (turn-1 latency fix)."""
+    """VoiceChannel subclass that populates author_info, maps outbound conv_ids,
+    and pre-warms the agent backend + memory before the member speaks."""
 
     def _handle_setup(self, message: SetupMessage) -> None:
         super()._handle_setup(message)
         conv_id = message.custom_parameters.conversation_id
 
-        # Always populate author_info (caller phone) and ai_agent_info (our number).
-        # The base class only does this when enable_voice_active_hydration=True.
         if message.from_number and conv_id in self._conversations:
             self._conversations[conv_id].author_info = AuthorInfo(
                 address=message.from_number,
@@ -583,16 +773,26 @@ class OwlVoiceChannel(VoiceChannel):
                 participant_id=message.custom_parameters.ai_agent_participant_id,
             )
 
-        # Outbound calls: our app server stores context under a key it generates
-        # and embeds that key as customParameters.outboundConvId in the TwiML.
-        # Map it here so handle_message_ready can pop it with the Maestro conv_id.
         extra = message.custom_parameters.model_extra or {}
         outbound_conv_id = extra.get("outboundConvId", "")
         if outbound_conv_id and outbound_conv_id in pending_outbound_context:
             pending_outbound_context[conv_id] = pending_outbound_context.pop(outbound_conv_id)
             logger.info(f"[setup] mapped outboundConvId={outbound_conv_id} → maestroConvId={conv_id}")
+            # Inherit app mapping from the outbound conv_id
+            if outbound_conv_id in conv_app_map:
+                conv_app_map[conv_id] = conv_app_map.pop(outbound_conv_id)
 
-        # Track call_sid for escalation — Twilio passes it via customParameters or pending map
+        # Resolve app config from the called number (message.to_number = our Twilio number)
+        if conv_id not in conv_app_map:
+            to_num = message.to_number or ""
+            app_cfg = _PHONE_TO_APP.get(to_num)
+            if app_cfg:
+                conv_app_map[conv_id] = app_cfg.route_prefix
+            elif ALL_APPS:
+                # Fallback: first app (single-app setups)
+                conv_app_map[conv_id] = next(iter(ALL_APPS))
+        cfg = _app_for_conv(conv_id)
+
         call_sid = extra.get("callSid", "")
         if call_sid:
             conversation_call_sid_map[conv_id] = call_sid
@@ -601,29 +801,18 @@ class OwlVoiceChannel(VoiceChannel):
         if conv_id in conversation_call_sid_map:
             logger.info(f"[setup] call_sid mapped conv_id={conv_id} call_sid={conversation_call_sid_map[conv_id]}")
 
-        # Populate outbound_conversation_map immediately at call setup so the CI
-        # webhook can find the member phone even if the caller hangs up before speaking.
         ctx = pending_outbound_context.get(conv_id)
-        phone = ""
-        if ctx:
-            phone = ctx.get("phone", "")
-        elif message.from_number:
-            phone = message.from_number
+        phone = ctx.get("phone", "") if ctx else (message.from_number or "")
 
-        # For outbound calls the Orchestrator labels our Twilio number as CUSTOMER and
-        # gives it a profile_id — but we want the member's existing profile as session_id.
-        # Look up the member profile by phone; fall back to the Maestro-assigned profile_id.
         member_profile_id: Optional[str] = None
-        if ctx and phone:
-            member_profile_id = _lookup_profile_id(phone)
+        if ctx and phone and cfg:
+            member_profile_id = _lookup_profile_id(phone, cfg)
             session_id = member_profile_id or message.custom_parameters.profile_id or conv_id
             if member_profile_id:
                 logger.info(f"[setup] outbound session resolved to member profile {member_profile_id} for phone={phone}")
         else:
             session_id = message.custom_parameters.profile_id or conv_id
 
-        # Store phone + resolved profile in outbound_conversation_map so the CI webhook
-        # can write summaries to the correct member profile without re-running lookupProfileId.
         if ctx and phone:
             outbound_conversation_map[conv_id] = {"phone": phone, "profileId": member_profile_id or ""}
             logger.info(f"[setup] outbound_conversation_map[{conv_id}] phone={phone} profileId={member_profile_id or '(pending)'}")
@@ -634,10 +823,11 @@ class OwlVoiceChannel(VoiceChannel):
                     name=f"transcript-greeting-{conv_id}",
                 )
 
-        asyncio.get_event_loop().create_task(
-            _prewarm(conv_id, session_id, phone),
-            name=f"prewarm-{conv_id}",
-        )
+        if cfg:
+            asyncio.get_event_loop().create_task(
+                _prewarm(conv_id, session_id, phone, cfg),
+                name=f"prewarm-{conv_id}",
+            )
 
 
 voice_channel = OwlVoiceChannel(tac=tac, auto_retrieve_memory=False)
@@ -654,44 +844,42 @@ async def handle_message_ready(
     t0 = time.time()
     conv_id = context.conversation_id
     session_id = context.profile_id or conv_id
+    cfg = _app_for_conv(conv_id)
+    if not cfg:
+        logger.error(f"[handle_message_ready] no app config for conv_id={conv_id} — dropping")
+        return
+    backend = _APP_BACKENDS[cfg.route_prefix]
 
-    # Resolve profile_id for transcript push (available after _handle_setup runs)
     _map_entry = outbound_conversation_map.get(conv_id)
     _transcript_profile_id = _map_entry.get("profileId", "") if isinstance(_map_entry, dict) else ""
     if _transcript_profile_id and user_message:
         asyncio.create_task(_push_transcript_event(_transcript_profile_id, "member", user_message))
 
-    # Turn 1: resolve outbound context + build enriched prompt
     is_turn1 = conv_id not in system_prompt_cache
 
     if is_turn1:
         ctx = pending_outbound_context.pop(conv_id, None)
         if ctx:
-            # Outbound call
-            system_prompt_cache[conv_id] = _build_system_prompt(ctx["name"], ctx["goal"], ctx["goalDesc"])
+            system_prompt_cache[conv_id] = _build_system_prompt(ctx["name"], ctx["goal"], ctx["goalDesc"], cfg)
             greeting_cache[conv_id] = ctx.get("greeting", "")
             phone = ctx["phone"]
-            # Preserve/update the dict entry set by _handle_setup (keeps profileId and real member phone).
-            # If _handle_setup already wrote a dict, merge name in; otherwise write fresh.
             existing = outbound_conversation_map.get(conv_id)
             if isinstance(existing, dict):
                 existing["name"] = ctx.get("name", "")
             else:
                 outbound_conversation_map[conv_id] = {"phone": phone, "profileId": "", "name": ctx.get("name", "")}
-            logger.info(f"[healthcare] outbound ctx applied conv_id={conv_id} member={ctx['name']} map={outbound_conversation_map.get(conv_id)}")
+            logger.info(f"[{cfg.id}] outbound ctx applied conv_id={conv_id} member={ctx['name']}")
         else:
-            # Inbound call — fetch memory using caller's address if available
-            system_prompt_cache[conv_id] = _build_inbound_system_prompt()
+            system_prompt_cache[conv_id] = _build_inbound_system_prompt(cfg)
             phone = (context.author_info.address if context.author_info else "") or ""
-            logger.info(f"[healthcare] inbound session conv_id={conv_id} from={phone}")
+            logger.info(f"[{cfg.id}] inbound session conv_id={conv_id} from={phone}")
 
-        # Use pre-warmed memory if available; otherwise fetch now (fallback)
         if conv_id in memory_context_cache:
             mem_ctx = memory_context_cache[conv_id]
-            logger.info(f"[healthcare] using pre-warmed memory conv_id={conv_id}")
+            logger.info(f"[{cfg.id}] using pre-warmed memory conv_id={conv_id}")
         else:
             if phone and not memory_response:
-                memory_response, traits = await _prefetch_memory(phone)
+                memory_response, traits = await _prefetch_memory(phone, cfg)
             else:
                 traits = {}
             mem_ctx = _build_memory_context(memory_response, traits)
@@ -706,43 +894,27 @@ async def handle_message_ready(
         enriched = ""
 
     system_prompt = system_prompt_cache.get(conv_id, "") if is_turn1 else ""
-
-    logger.info(f"[healthcare] invoking agent session_id={session_id} conv_id={conv_id} turn1={is_turn1} message=\"{user_message[:60]}\"")
-
-    agent_ws = await get_or_create_agent_ws(session_id)
-    if not agent_ws:
-        await voice_channel.send_response(conv_id, "I'm sorry, I can't reach the agent right now.", role="assistant")
-        return
-
-    agent_msg: dict = {
-        "type": "prompt",
-        "voicePrompt": user_message,
-        "systemPrompt": system_prompt,
-        "memoryContext": enriched,
-    }
-
-    if system_prompt:
-        logger.info(f"[agent] turn1 systemPrompt:\n{system_prompt}")
-    if enriched:
-        logger.info(f"[agent] turn1 memoryContext:\n{enriched}")
+    logger.info(f"[{cfg.id}] invoking agent session_id={session_id} conv_id={conv_id} turn1={is_turn1} message=\"{user_message[:60]}\"")
 
     try:
-        await agent_ws.send(json.dumps(agent_msg))
-
         async def stream_from_agent() -> AsyncGenerator[str, None]:
             first_token = False
             collected: list[str] = []
             try:
-                async for raw in agent_ws:
-                    data = json.loads(raw)
+                async for data in backend.invoke(
+                    session_id=session_id,
+                    prompt=user_message,
+                    system_prompt=system_prompt,
+                    context=enriched,
+                ):
                     msg_type = data.get("type", "")
                     if msg_type not in ("text",):
-                        logger.info(f"[agentcore] ws msg type={msg_type} data={str(data)[:200]}")
+                        logger.info(f"[agent] voice msg type={msg_type} data={str(data)[:200]}")
                     if msg_type == "text":
                         token = data.get("token", "")
                         if token:
                             if not first_token:
-                                logger.info(f"[healthcare] TTFT {(time.time()-t0)*1000:.0f}ms")
+                                logger.info(f"[{cfg.id}] TTFT {(time.time()-t0)*1000:.0f}ms")
                                 first_token = True
                             collected.append(token)
                             yield token
@@ -758,81 +930,63 @@ async def handle_message_ready(
                         if not sc_phone:
                             map_entry = outbound_conversation_map.get(conv_id)
                             sc_phone = map_entry.get("phone", "") if isinstance(map_entry, dict) else ""
-                        logger.info(f"[schedule_call] agent requested call conv_id={conv_id} phone={sc_phone} reason={sc_reason}")
+                        logger.info(f"[{cfg.id}][schedule_call] agent requested call conv_id={conv_id} phone={sc_phone}")
                         asyncio.create_task(_trigger_outbound_call(conv_id, sc_phone, sc_reason))
                         break
                     elif msg_type == "escalate":
                         reason = str(data.get("reason", "member_requested_human"))
                         urgency = str(data.get("urgency", "normal"))
-                        target_queue = str(data.get("targetQueue", FLEX_DEFAULT_QUEUE))
-                        logger.info(f"[escalation] agent requested transfer conv_id={conv_id} reason={reason} urgency={urgency}")
-                        escalated = await _escalate_call_to_flex(
-                            conv_id=conv_id,
-                            reason=reason,
-                            urgency=urgency,
-                            target_queue=target_queue,
-                        )
+                        target_queue = str(data.get("targetQueue", cfg.flex_queue))
+                        logger.info(f"[{cfg.id}][escalation] agent requested transfer conv_id={conv_id} reason={reason}")
+                        escalated = await _escalate_call_to_flex(conv_id=conv_id, reason=reason, urgency=urgency, target_queue=target_queue)
                         if not escalated:
                             yield " Unfortunately I wasn't able to complete the transfer. Please try again."
                         break
                     elif msg_type == "tool_start":
-                        logger.info(f"[agentcore] tool_start tool={data.get('tool')}")
+                        logger.info(f"[agent] tool_start tool={data.get('tool')}")
                     elif msg_type == "tool_result":
-                        logger.info(f"[agentcore] tool_result status={data.get('status')}")
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning(f"[agentcore] WebSocket closed mid-stream session_id={session_id}")
-                agent_connections.pop(session_id, None)
+                        logger.info(f"[agent] tool_result status={data.get('status')}")
             except Exception as e:
-                logger.error(f"[agentcore] stream error: {e}")
+                logger.error(f"[agent] stream error: {e}")
                 yield "I'm sorry, something went wrong."
 
         await voice_channel.send_response(conv_id, stream_from_agent(), role="assistant")
 
-    except websockets.exceptions.ConnectionClosed:
-        agent_connections.pop(session_id, None)
-        await voice_channel.send_response(conv_id, "I'm sorry, the connection was lost.", role="assistant")
     except Exception as e:
-        logger.error(f"[healthcare] message error: {e}", exc_info=True)
+        logger.error(f"[{cfg.id}] message error: {e}", exc_info=True)
         await voice_channel.send_response(conv_id, "I'm sorry, something went wrong.", role="assistant")
 
-    logger.info(f"[healthcare] end-to-end {(time.time()-t0)*1000:.0f}ms session_id={session_id}")
+    logger.info(f"[{cfg.id}] end-to-end {(time.time()-t0)*1000:.0f}ms session_id={session_id}")
 
 
 async def handle_conversation_ended(context: ConversationSession) -> None:
     conv_id = context.conversation_id
     session_id = context.profile_id or conv_id
-
-    ws = agent_connections.pop(session_id, None)
-    if ws:
-        try:
-            await ws.close()
-        except Exception:
-            pass
+    cfg = _app_for_conv(conv_id)
+    if cfg:
+        await _APP_BACKENDS[cfg.route_prefix].close_session(session_id)
 
     system_prompt_cache.pop(conv_id, None)
     greeting_cache.pop(conv_id, None)
     memory_context_cache.pop(conv_id, None)
     conversation_call_sid_map.pop(conv_id, None)
-    # outbound_conversation_map entry stays until CI webhook consumes it
-    logger.info(f"[healthcare] cleaned up conv_id={conv_id}")
+    conv_app_map.pop(conv_id, None)
+    logger.info(f"[{cfg.id if cfg else '?'}] cleaned up conv_id={conv_id}")
 
     try:
         await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
     except Exception as e:
-        # 400 "Conversation is closed" is expected — the relay callback already closed it
         if "already" not in str(e).lower() and "400" not in str(e):
-            logger.warning(f"[healthcare] maestro close failed conv_id={conv_id}: {e}")
+            logger.warning(f"[{cfg.id if cfg else '?'}] maestro close failed conv_id={conv_id}: {e}")
 
 
 async def handle_interrupt(context: ConversationSession, interrupt_data) -> None:
-    session_id = context.profile_id or context.conversation_id
-    ws = agent_connections.get(session_id)
-    if ws:
-        try:
-            utterance = getattr(interrupt_data, "utterance_until_interrupt", "") or ""
-            await ws.send(json.dumps({"type": "interrupt", "utterance_until_interrupt": utterance}))
-        except Exception:
-            pass
+    conv_id = context.conversation_id
+    session_id = context.profile_id or conv_id
+    cfg = _app_for_conv(conv_id)
+    utterance = getattr(interrupt_data, "utterance_until_interrupt", "") or ""
+    if cfg:
+        await _APP_BACKENDS[cfg.route_prefix].interrupt(session_id, utterance)
 
 
 tac.on_message_ready(handle_message_ready)
@@ -846,209 +1000,70 @@ tac.on_interrupt(handle_interrupt)
 app = FastAPI()
 
 
-def _get_urls(request: Request) -> tuple[str, str]:
-    proto = request.headers.get("x-forwarded-proto", "https")
-    host = request.headers.get("host", PUBLIC_DOMAIN)
-    ws_proto = "wss" if proto == "https" else "ws"
-    return f"{ws_proto}://{host}/ws", f"{proto}://{host}/conversation-relay-callback"
+from _routes import register_app_routes
 
-
-@app.post("/twiml")
-async def post_twiml(request: Request) -> Response:
-    """TwiML for inbound calls."""
-    form = {k: str(v) for k, v in (await request.form()).items()}
-    ws_url, callback_url = _get_urls(request)
-    twiml = await voice_channel.handle_incoming_call(
-        to_number=form.get("To", ""),
-        from_number=form.get("From", ""),
-        options={
-            "websocket_url": ws_url,
-            "action_url": callback_url,
-            "welcome_greeting": "Hello! This is the Owl Health Care Team. How can I assist you today?",
-        },
-        call_sid=form.get("CallSid", ""),
+for _app_cfg in ALL_APPS.values():
+    register_app_routes(
+        app=app, cfg=_app_cfg, voice_channel=voice_channel,
+        pending_outbound_context=pending_outbound_context,
+        pending_call_sid_map=pending_call_sid_map,
+        conv_app_map=conv_app_map,
+        outbound_conversation_map=outbound_conversation_map,
+        twilio_client=twilio_client,
+        _APP_BACKENDS=_APP_BACKENDS,
+        _push_transcript_event=_push_transcript_event,
+        _lookup_profile_id=_lookup_profile_id,
+        _prefetch_memory=_prefetch_memory,
+        _build_memory_context=_build_memory_context,
+        _build_sms_system_prompt=_build_sms_system_prompt,
+        _invoke_agent=_invoke_agent,
+        _write_sms_observation=_write_sms_observation,
+        _escalate_call_to_flex=_escalate_call_to_flex,
+        PUBLIC_DOMAIN=PUBLIC_DOMAIN,
+        APP_PORT=APP_PORT,
+        logger=logger,
+        FastAPIWebSocketAdapter=FastAPIWebSocketAdapter,
+        websockets=websockets,
     )
-    return Response(content=twiml, media_type="application/xml")
-
-
-@app.post("/twiml-outbound")
-async def post_twiml_outbound(request: Request) -> Response:
-    """TwiML for outbound calls. Routes to ConversationRelay (agentcore) or Stream (elevenlabs)."""
-    params = dict(request.query_params)
-    conv_id = params.get("conv_id", "")
-    ctx = pending_outbound_context.get(conv_id) if conv_id else None
-
-    if AGENT_BACKEND == "elevenlabs":
-        proto    = request.headers.get("x-forwarded-proto", "https")
-        host     = request.headers.get("host", PUBLIC_DOMAIN)
-        ws_proto = "wss" if proto == "https" else "ws"
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Connect>
-    <Stream url="{ws_proto}://{host}/ws-el">
-      <Parameter name="conv_id" value="{conv_id}" />
-    </Stream>
-  </Connect>
-</Response>"""
-        return Response(content=twiml, media_type="application/xml")
-
-    # agentcore — ConversationRelay
-    greeting = ctx.get("greeting", "") if ctx else "Hello! This is the Owl Health Care Team."
-    form = {k: str(v) for k, v in (await request.form()).items()}
-    call_sid = form.get("CallSid", "")
-    # Cache call_sid now so _handle_setup can map it to the Maestro conv_id
-    if conv_id and call_sid:
-        pending_call_sid_map[conv_id] = call_sid
-    ws_url, callback_url = _get_urls(request)
-    # For outbound calls swap From/To so TAC labels the member (To) as CUSTOMER.
-    # This ensures memory extraction writes summaries to the member's profile,
-    # not to the Twilio from-number's profile.
-    raw_to   = form.get("To", "")
-    raw_from = form.get("From", "")
-    is_outbound = bool(ctx)
-    twiml = await voice_channel.handle_incoming_call(
-        to_number=raw_from if is_outbound else raw_to,
-        from_number=raw_to if is_outbound else raw_from,
-        options={
-            "websocket_url": ws_url,
-            "action_url": callback_url,
-            "welcome_greeting": greeting,
-            "custom_parameters": {
-                "outboundConvId": conv_id,
-                "callSid": call_sid,
-            } if conv_id else {"callSid": call_sid},
-        },
-        call_sid=call_sid,
-    )
-    return Response(content=twiml, media_type="application/xml")
-
-
-@app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket) -> None:
-    await voice_channel.handle_websocket(FastAPIWebSocketAdapter(websocket))
-
-
-@app.post("/conversation-relay-callback")
-async def cr_callback(request: Request) -> Response:
-    form = {k: str(v) for k, v in (await request.form()).items()}
-    result = await voice_channel.handle_conversation_relay_callback(form)
-    return Response(
-        content=result or "OK",
-        media_type="text/xml" if result else "text/plain",
-    )
-
-
-@app.post("/set-outbound-context")
-async def set_outbound_context(request: Request) -> dict:
-    """IPC endpoint — Node.js app server POSTs outbound ctx before dialling."""
-    body = await request.json()
-    conv_id = body.get("conv_id", "")
-    if not conv_id:
-        return {"success": False, "error": "conv_id required"}
-    pending_outbound_context[conv_id] = body
-    logger.info(f"[ipc] outbound context stored conv_id={conv_id} member={body.get('name')}")
-
-    # Forward to ElevenLabs server so it has context when the Stream WebSocket connects
-    if AGENT_BACKEND == "elevenlabs":
-        import httpx
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.post(f"{EL_BASE}/set-outbound-context", json=body, timeout=5)
-            logger.info(f"[ipc] forwarded context to ElevenLabs server conv_id={conv_id}")
-        except Exception as e:
-            logger.warning(f"[ipc] ElevenLabs context forward failed: {e}")
-
-    return {"success": True}
 
 
 @app.get("/get-outbound-phone/{conv_id}")
 async def get_outbound_phone(conv_id: str) -> dict:
-    """IPC endpoint — Node.js CI webhook calls this to resolve member phone + profileId."""
+    """Shared — Node.js CI webhook resolves member phone + profileId from any app."""
     entry = outbound_conversation_map.get(conv_id)
     if isinstance(entry, dict):
         return {"phone": entry.get("phone", ""), "profileId": entry.get("profileId", "")}
     if isinstance(entry, str):
-        # Legacy string entry (elevenlabs ws-el path) — no profileId cached
         return {"phone": entry, "profileId": ""}
-    phone = ""
-
-    # Fallback for elevenlabs backend: the stream start event has no Maestro conv_id,
-    # so the map is keyed by synthetic outbound-* id. Look up participants via Conversations API.
-    if conv_id.startswith("conv_conversation_") and MEMORY_API_KEY:
-        import httpx
-        try:
-            async with httpx.AsyncClient() as client:
-                res = await client.get(
-                    f"https://conversations.twilio.com/v2/Conversations/{conv_id}/Participants",
-                    auth=(MEMORY_API_KEY, MEMORY_API_TOKEN),
-                    timeout=5,
-                )
-                participants = res.json().get("participants", [])
-                our_number = os.environ.get("TWILIO_TAC_PHONE_NUMBER", "")
-                for p in participants:
-                    addresses = p.get("addresses") or []
-                    address = addresses[0].get("address", "") if addresses else ""
-                    # Pick the participant whose address is not our Twilio number
-                    if address and address != our_number and address.startswith("+"):
-                        outbound_conversation_map[conv_id] = address
-                        logger.info(f"[get-outbound-phone] resolved via API {conv_id} → {address}")
-                        return {"phone": address}
-        except Exception as e:
-            logger.warning(f"[get-outbound-phone] API fallback failed: {e}")
-
-    return {"phone": phone}
-
-
-@app.websocket("/ws-el")
-async def ws_el_proxy(websocket: WebSocket) -> None:
-    """Proxy Twilio <Stream> WebSocket to ElevenLabs server (elevenlabs backend only)."""
-    await websocket.accept()
-    el_ws_url = f"ws://localhost:{EL_PORT}/ws"
-    try:
-        async with websockets.connect(el_ws_url) as el_ws:
-            async def twilio_to_el() -> None:
-                async for msg in websocket.iter_text():
-                    # Intercept the start event to map Maestro conv_id → phone
-                    try:
-                        parsed = json.loads(msg)
-                        if parsed.get("event") == "start":
-                            start = parsed.get("start", {})
-                            logger.info(f"[ws-el] start event keys: {list(start.keys())} customParameters={start.get('customParameters')}")
-                            maestro_conv_id = start.get("conversationSid", "")
-                            outbound_conv_id = start.get("customParameters", {}).get("conv_id", "")
-                            if outbound_conv_id and outbound_conv_id in pending_outbound_context:
-                                ctx = pending_outbound_context[outbound_conv_id]
-                                phone = ctx.get("phone", "")
-                                # Map the real Maestro conv_id if available, else keep synthetic id
-                                map_key = maestro_conv_id or outbound_conv_id
-                                member_pid = _lookup_profile_id(phone) if phone else ""
-                                outbound_conversation_map[map_key] = {"phone": phone, "profileId": member_pid or ""}
-                                logger.info(f"[ws-el] mapped {map_key} → phone={phone} profileId={member_pid or '(none)'}")
-                    except Exception:
-                        pass
-                    await el_ws.send(msg)
-
-            async def el_to_twilio() -> None:
-                async for msg in el_ws:
-                    await websocket.send_text(msg if isinstance(msg, str) else msg.decode())
-
-            await asyncio.gather(twilio_to_el(), el_to_twilio())
-    except Exception as e:
-        logger.error(f"[ws-el] proxy error: {e}")
+    # Fallback: look up participants via Conversations API (elevenlabs path)
+    if conv_id.startswith("conv_conversation_"):
+        cfg = next(iter(ALL_APPS.values())) if ALL_APPS else None
+        if cfg and cfg.memory_api_key:
+            try:
+                async with httpx.AsyncClient() as client:
+                    res = await client.get(
+                        f"https://conversations.twilio.com/v2/Conversations/{conv_id}/Participants",
+                        auth=(cfg.memory_api_key, cfg.memory_api_token),
+                        timeout=5,
+                    )
+                    for p in res.json().get("participants", []):
+                        addresses = p.get("addresses") or []
+                        address = addresses[0].get("address", "") if addresses else ""
+                        if address and address != cfg.phone_number and address.startswith("+"):
+                            outbound_conversation_map[conv_id] = address
+                            return {"phone": address, "profileId": ""}
+            except Exception as e:
+                logger.warning(f"[get-outbound-phone] API fallback failed: {e}")
+    return {"phone": "", "profileId": ""}
 
 
 @app.post("/ci-webhook")
 async def ci_webhook_proxy(request: Request) -> dict:
-    """Forward CI webhook to Node.js app server (port APP_PORT)."""
-    import httpx
+    """Forward CI webhook to the shared Node.js /ci-webhook route."""
     body = await request.json()
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.post(
-                f"http://localhost:{APP_PORT}/ci-webhook",
-                json=body,
-                timeout=10,
-            )
+            res = await client.post(f"http://localhost:{APP_PORT}/ci-webhook", json=body, timeout=10)
         return res.json()
     except Exception as e:
         logger.error(f"[ci-webhook] proxy failed: {e}")
@@ -1057,22 +1072,20 @@ async def ci_webhook_proxy(request: Request) -> dict:
 
 @app.post("/browser-answer-twiml")
 async def browser_answer_twiml(request: Request) -> Response:
-    """TwiML: bridge member to browser agent with a Maestro CO conversation for CI monitoring."""
     from datetime import datetime, timezone
     from tac.models import ParticipantAddress
-
     form = {k: str(v) for k, v in (await request.form()).items()}
     params = dict(request.query_params)
     call_sid = form.get("CallSid", "")
     member_phone = params.get("member_phone", form.get("To", ""))
     profile_id = params.get("profile_id", "")
     member_name = params.get("member_name", "member")
-
+    # Use first app's phone number for AI_AGENT participant
+    first_cfg = next(iter(ALL_APPS.values())) if ALL_APPS else None
+    our_number = first_cfg.phone_number if first_cfg else ""
     try:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        conversation = await tac.maestro_client.create_conversation(
-            name=f"human-agent-call-{call_sid or ts}"
-        )
+        conversation = await tac.maestro_client.create_conversation(name=f"human-agent-call-{call_sid or ts}")
         conv_id = conversation.id
         member_resp = await tac.maestro_client.add_participant(
             conversation_id=conv_id,
@@ -1082,142 +1095,148 @@ async def browser_answer_twiml(request: Request) -> Response:
         resolved_profile_id = (member_resp.profile_id if member_resp else None) or profile_id
         await tac.maestro_client.add_participant(
             conversation_id=conv_id,
-            addresses=[ParticipantAddress(channel="VOICE", address=PHONE_NUMBER, channelId=call_sid)],
+            addresses=[ParticipantAddress(channel="VOICE", address=our_number, channelId=call_sid)],
             participant_type="AI_AGENT",
         )
         outbound_conversation_map[conv_id] = {"phone": member_phone, "profileId": resolved_profile_id, "name": member_name}
         conversation_call_sid_map[conv_id] = call_sid
-        logger.info(f"[browser-call] CO conversation created convId={conv_id} profileId={resolved_profile_id} callSid={call_sid}")
     except Exception as e:
         logger.error(f"[browser-call] failed to create CO conversation: {e}")
-
-    twiml = """<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Dial>
-    <Client>care-team-agent</Client>
-  </Dial>
-</Response>"""
+    twiml = ('<?xml version="1.0" encoding="UTF-8"?><Response><Dial>'
+             '<Client>care-team-agent</Client></Dial></Response>')
     return Response(content=twiml, media_type="application/xml")
 
 
 @app.post("/browser-call-status")
 async def browser_call_status(request: Request) -> Response:
-    """Twilio status callback: close the CO conversation when the call completes."""
     form = {k: str(v) for k, v in (await request.form()).items()}
     call_sid = form.get("CallSid", "")
-    call_status = form.get("CallStatus", "")
-    logger.info(f"[browser-call] status callSid={call_sid} status={call_status}")
-    if call_status == "completed":
+    if form.get("CallStatus") == "completed":
         conv_id = next((c for c, s in conversation_call_sid_map.items() if s == call_sid), None)
         if conv_id:
             try:
                 await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
-                logger.info(f"[browser-call] closed CO conversation convId={conv_id}")
             except Exception as e:
-                logger.error(f"[browser-call] failed to close conversation convId={conv_id}: {e}")
+                logger.error(f"[browser-call] failed to close conversation: {e}")
     return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
 
 
+@app.post("/twiml")
+async def twiml_shared(request: Request) -> Response:
+    """Shared inbound voice webhook — dispatches to the right app by To number."""
+    form = {k: str(v) for k, v in (await request.form()).items()}
+    to_phone = form.get("To", "")
+    cfg = _PHONE_TO_APP.get(to_phone)
+    if not cfg and ALL_APPS:
+        cfg = next(iter(ALL_APPS.values()))
+        logger.warning(f"[twiml] no app matched To={to_phone} — falling back to {cfg.id}")
+    if not cfg:
+        return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
+
+    proto = request.headers.get("x-forwarded-proto", "https")
+    host = request.headers.get("host", PUBLIC_DOMAIN)
+    ws_proto = "wss" if proto == "https" else "ws"
+    ws_url = f"{ws_proto}://{host}{cfg.route_prefix}/ws"
+    callback_url = f"{proto}://{host}{cfg.route_prefix}/conversation-relay-callback"
+
+    twiml = await voice_channel.handle_incoming_call(
+        to_number=form.get("To", ""),
+        from_number=form.get("From", ""),
+        options={"websocket_url": ws_url, "action_url": callback_url,
+                 "welcome_greeting": cfg.inbound_greeting},
+        call_sid=form.get("CallSid", ""),
+    )
+    return Response(content=twiml, media_type="application/xml")
+
+
 @app.post("/sms")
-async def post_sms(request: Request) -> Response:
-    """Handle inbound SMS reply from a member and reply via AgentCore."""
+async def sms_shared(request: Request) -> Response:
+    """Shared SMS webhook — dispatches to the right app by To number."""
     form = dict(await request.form())
+    to_phone = form.get("To", "")
     from_phone = form.get("From", "")
-    body = form.get("Body", "").strip()
+    body_text = form.get("Body", "").strip()
+    logger.info(f"[sms] received To={to_phone} From={from_phone} Body=\"{body_text[:80]}\"")
+    logger.info(f"[sms] _PHONE_TO_APP keys={list(_PHONE_TO_APP.keys())}")
     empty_twiml = Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
-    if not body or not from_phone:
+
+    cfg = _PHONE_TO_APP.get(to_phone)
+    if not cfg and ALL_APPS:
+        cfg = next(iter(ALL_APPS.values()))
+        logger.warning(f"[sms] no app matched To={to_phone} — falling back to {cfg.id}")
+    if not cfg:
+        logger.error(f"[sms] no app config available for To={to_phone}")
+        return empty_twiml
+    logger.info(f"[sms] dispatching to app={cfg.id} phone_number={cfg.phone_number}")
+
+    if not body_text or not from_phone:
+        logger.warning(f"[{cfg.id}][sms] empty body or from_phone — ignoring")
         return empty_twiml
 
-    # Allow simulating a member's SMS conversation using a personal test phone.
-    # When SMS_SIMULATE_MEMBER_PHONE is set and the message comes from OUTBOUND_CALL_TO,
-    # use the member's phone for profile lookup/memory — reply still goes to from_phone.
     lookup_phone = from_phone
-    if SMS_SIMULATE_MEMBER_PHONE and OUTBOUND_CALL_TO and from_phone == OUTBOUND_CALL_TO:
-        lookup_phone = SMS_SIMULATE_MEMBER_PHONE
-        logger.info(f"[sms] simulating member {lookup_phone} from personal phone {from_phone}")
+    logger.info(f"[{cfg.id}][sms] sms_simulate_member_phone={cfg.sms_simulate_member_phone!r} outbound_call_to={cfg.outbound_call_to!r}")
+    if cfg.sms_simulate_member_phone and cfg.outbound_call_to and from_phone == cfg.outbound_call_to:
+        lookup_phone = cfg.sms_simulate_member_phone
+        logger.info(f"[{cfg.id}][sms] simulating member {lookup_phone} (actual sender={from_phone})")
 
+    logger.info(f"[{cfg.id}][sms] looking up profile for phone={lookup_phone} store={cfg.memory_store_id}")
     loop = asyncio.get_event_loop()
-    profile_id = await loop.run_in_executor(None, _lookup_profile_id, lookup_phone)
+    profile_id = await loop.run_in_executor(None, _lookup_profile_id, lookup_phone, cfg)
     if not profile_id:
-        logger.warning(f"[sms] no profile for {lookup_phone}")
+        logger.warning(f"[{cfg.id}][sms] no profile found for phone={lookup_phone} — cannot proceed")
         return empty_twiml
+    logger.info(f"[{cfg.id}][sms] profile_id={profile_id}")
 
-    logger.info(f"[sms] inbound from={from_phone} lookup_phone={lookup_phone} profile_id={profile_id} body=\"{body[:80]}\"")
+    logger.info(f"[{cfg.id}][sms] inbound from={from_phone} profile_id={profile_id} body=\"{body_text[:80]}\"")
 
-    # Parallel: warm AgentCore WS connection while fetching memory (skip duplicate lookup)
     t0 = time.time()
-    memory_task = asyncio.create_task(_prefetch_memory(lookup_phone, profile_id=profile_id))
-    ws_task = asyncio.create_task(get_or_create_agent_ws(profile_id))
-    (memory, traits), _ = await asyncio.gather(memory_task, ws_task)
-    logger.info(f"[sms] memory+ws parallel fetch in {(time.time()-t0)*1000:.0f}ms")
+    backend = _APP_BACKENDS[cfg.route_prefix]
+    logger.info(f"[{cfg.id}][sms] backend={cfg.agent_backend_name} prefetching memory + prewarming agent")
+    memory_task = asyncio.create_task(_prefetch_memory(lookup_phone, cfg, profile_id=profile_id))
+    prewarm_task = asyncio.create_task(backend.prewarm(profile_id))
+    (memory, traits), prewarm_ok = await asyncio.gather(memory_task, prewarm_task)
+    logger.info(f"[{cfg.id}][sms] memory+backend ready in {(time.time()-t0)*1000:.0f}ms prewarm_ok={prewarm_ok}")
 
     context = _build_memory_context(memory, traits)
-    system_prompt = _build_sms_system_prompt()
+    system_prompt = _build_sms_system_prompt(cfg)
+    logger.info(f"[{cfg.id}][sms] system_prompt={system_prompt[:120]!r} context_len={len(context)}")
 
     try:
-        reply = await _invoke_agentcore_http(
-            session_id=profile_id,
-            prompt=body,
-            system_prompt=system_prompt,
-            context=context,
-            member_phone=lookup_phone,
-            profile_id=profile_id,
-            member_traits=traits,
+        logger.info(f"[{cfg.id}][sms] invoking agent session_id={profile_id}")
+        reply = await _invoke_agent(
+            session_id=profile_id, prompt=body_text, system_prompt=system_prompt,
+            context=context, cfg=cfg, member_phone=lookup_phone,
+            profile_id=profile_id, member_traits=traits,
         )
+        logger.info(f"[{cfg.id}][sms] agent reply ({len(reply)} chars): \"{reply[:120]}\"")
     except Exception as e:
-        logger.error(f"[sms] AgentCore invocation failed: {e}")
+        logger.error(f"[{cfg.id}][sms] agent invocation failed: {e}", exc_info=True)
         return empty_twiml
 
-    logger.info(f"[sms] reply profile_id={profile_id} reply=\"{reply[:80]}\"")
+    if not reply:
+        logger.warning(f"[{cfg.id}][sms] agent returned empty reply — not sending SMS")
+        return empty_twiml
 
-    if twilio_client and PHONE_NUMBER:
+    logger.info(f"[{cfg.id}][sms] sending SMS to={from_phone} from={cfg.phone_number} twilio_client={'set' if twilio_client else 'MISSING'}")
+    if twilio_client and cfg.phone_number:
         try:
-            twilio_client.messages.create(to=from_phone, from_=PHONE_NUMBER, body=reply)
-            logger.info(f"[sms] reply sent to={from_phone}")
+            msg = twilio_client.messages.create(to=from_phone, from_=cfg.phone_number, body=reply)
+            logger.info(f"[{cfg.id}][sms] sent sid={msg.sid}")
         except Exception as e:
-            logger.error(f"[sms] send failed: {e}")
+            logger.error(f"[{cfg.id}][sms] Twilio send failed: {e}", exc_info=True)
+    else:
+        logger.error(f"[{cfg.id}][sms] cannot send — twilio_client={bool(twilio_client)} phone_number={cfg.phone_number!r}")
 
-    # Write observations after sending reply so they don't delay the member response
-    if SMS_WRITE_OBSERVATION:
-        loop.run_in_executor(None, _write_sms_observation, profile_id, "member", body)
-        loop.run_in_executor(None, _write_sms_observation, profile_id, "agent", reply)
+    if cfg.sms_write_observation:
+        loop.run_in_executor(None, _write_sms_observation, profile_id, "member", body_text, cfg)
+        loop.run_in_executor(None, _write_sms_observation, profile_id, "agent", reply, cfg)
 
     return empty_twiml
 
 
-@app.post("/escalate-call")
-async def escalate_call_endpoint(request: Request) -> dict:
-    """Care-team-initiated escalation. Accepts conv_id or profile_id."""
-    body = await request.json()
-    conv_id = body.get("conv_id", "")
-    profile_id = body.get("profile_id", "")
-    reason = body.get("reason", "care_team_requested")
-
-    # Resolve conv_id from profile_id via reverse-lookup on outbound_conversation_map
-    if not conv_id and profile_id:
-        for cid, entry in outbound_conversation_map.items():
-            pid = entry.get("profileId", "") if isinstance(entry, dict) else ""
-            if pid == profile_id:
-                conv_id = cid
-                break
-
-    # Also check system_prompt_cache (all active conversations) as fallback
-    if not conv_id and profile_id:
-        for cid in list(system_prompt_cache.keys()):
-            if conversation_call_sid_map.get(cid):
-                conv_id = cid
-                break
-
-    if not conv_id:
-        return {"success": False, "error": "No active call found for this member"}
-
-    success = await _escalate_call_to_flex(conv_id, reason, "normal", FLEX_DEFAULT_QUEUE)
-    return {"success": success}
-
-
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "healthy"}
+    return {"status": "healthy", "apps": list(ALL_APPS.keys())}
 
 
 # ---------------------------------------------------------------------------
@@ -1226,5 +1245,6 @@ async def health() -> dict:
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"Owl Health TAC Server starting — {PUBLIC_DOMAIN}:{TAC_PORT}")
+    app_list = ", ".join(ALL_APPS.keys())
+    logger.info(f"TAC Server starting — apps=[{app_list}] domain={PUBLIC_DOMAIN} port={TAC_PORT}")
     uvicorn.run(app, host="0.0.0.0", port=TAC_PORT, log_config=None, log_level="info")
