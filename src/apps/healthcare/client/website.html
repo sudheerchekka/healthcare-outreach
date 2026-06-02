@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Owl Health — Care Coordination</title>
+<style>
+  :root {
+    --brand: #F22F46;
+    --brand-dark: #c0192b;
+    --brand-light: #fff0f2;
+    --navy: #0D122B;
+    --text: #323438;
+    --muted: #6b7280;
+    --border: #e8e9ef;
+    --bg: #f8f8fc;
+    --white: #ffffff;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: var(--text); background: var(--white); }
+
+  /* ── Nav ── */
+  nav { background: var(--white); border-bottom: 1px solid var(--border); padding: 0 40px; display: flex; align-items: center; justify-content: space-between; height: 64px; position: sticky; top: 0; z-index: 100; }
+  .nav-logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 20px; color: var(--navy); }
+  .nav-logo svg { width: 32px; height: 32px; }
+  .nav-links { display: flex; gap: 32px; }
+  .nav-links a { text-decoration: none; color: var(--muted); font-size: 15px; font-weight: 500; transition: color .15s; }
+  .nav-links a:hover { color: var(--brand); }
+  .nav-cta { background: var(--brand); color: var(--white); border: none; border-radius: 8px; padding: 9px 20px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .15s; }
+  .nav-cta:hover { background: var(--brand-dark); }
+
+  /* ── Hero ── */
+  .hero { background: linear-gradient(135deg, var(--navy) 0%, #1a2550 100%); color: var(--white); padding: 100px 40px; text-align: center; }
+  .hero h1 { font-size: 52px; font-weight: 700; line-height: 1.15; max-width: 700px; margin: 0 auto 20px; }
+  .hero h1 span { color: #ff6b7a; }
+  .hero p { font-size: 18px; color: #c5cae0; max-width: 520px; margin: 0 auto 36px; line-height: 1.6; }
+  .hero-btns { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .btn-primary { background: var(--brand); color: var(--white); border: none; border-radius: 8px; padding: 14px 28px; font-size: 16px; font-weight: 600; cursor: pointer; transition: background .15s; }
+  .btn-primary:hover { background: var(--brand-dark); }
+  .btn-outline { background: transparent; color: var(--white); border: 2px solid rgba(255,255,255,.35); border-radius: 8px; padding: 14px 28px; font-size: 16px; font-weight: 600; cursor: pointer; transition: border-color .15s, color .15s; }
+  .btn-outline:hover { border-color: var(--white); }
+
+  /* ── Stats bar ── */
+  .stats { background: var(--brand-light); border-top: 1px solid #fdd; border-bottom: 1px solid #fdd; padding: 32px 40px; display: flex; justify-content: center; gap: 60px; flex-wrap: wrap; }
+  .stat { text-align: center; }
+  .stat .num { font-size: 32px; font-weight: 700; color: var(--brand); }
+  .stat .label { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+  /* ── Services ── */
+  .section { padding: 80px 40px; max-width: 1100px; margin: 0 auto; }
+  .section-title { text-align: center; margin-bottom: 48px; }
+  .section-title h2 { font-size: 36px; font-weight: 700; color: var(--navy); margin-bottom: 12px; }
+  .section-title p { color: var(--muted); font-size: 16px; max-width: 480px; margin: 0 auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; }
+  .card { background: var(--white); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; transition: box-shadow .2s; }
+  .card:hover { box-shadow: 0 4px 24px rgba(0,0,0,.07); }
+  .card-icon { width: 44px; height: 44px; background: var(--brand-light); border-radius: 10px; display: flex; align-items: center; justify-content: center; margin-bottom: 16px; font-size: 22px; }
+  .card h3 { font-size: 17px; font-weight: 600; color: var(--navy); margin-bottom: 8px; }
+  .card p { font-size: 14px; color: var(--muted); line-height: 1.6; }
+
+  /* ── CTA band ── */
+  .cta-band { background: var(--navy); color: var(--white); text-align: center; padding: 72px 40px; }
+  .cta-band h2 { font-size: 34px; font-weight: 700; margin-bottom: 14px; }
+  .cta-band p { color: #c5cae0; margin-bottom: 32px; font-size: 16px; }
+
+  /* ── Footer ── */
+  footer { background: var(--bg); border-top: 1px solid var(--border); padding: 32px 40px; text-align: center; color: var(--muted); font-size: 13px; }
+
+  /* ── Chat bubble ── */
+  #chat-bubble {
+    position: fixed; bottom: 28px; right: 28px; z-index: 1000;
+    width: 56px; height: 56px; border-radius: 50%;
+    background: var(--brand); color: var(--white);
+    border: none; cursor: pointer; font-size: 26px;
+    box-shadow: 0 4px 20px rgba(242,47,70,.45);
+    display: flex; align-items: center; justify-content: center;
+    transition: transform .15s, background .15s;
+  }
+  #chat-bubble:hover { background: var(--brand-dark); transform: scale(1.07); }
+
+  /* ── Chat panel ── */
+  #chat-panel {
+    position: fixed; bottom: 96px; right: 28px; z-index: 1000;
+    width: 360px; background: var(--white);
+    border-radius: 14px; box-shadow: 0 8px 40px rgba(0,0,0,.18);
+    display: flex; flex-direction: column; overflow: hidden;
+    transform: scale(.92) translateY(12px); opacity: 0;
+    transition: transform .2s, opacity .2s;
+    pointer-events: none;
+    max-height: 540px;
+  }
+  #chat-panel.open { transform: scale(1) translateY(0); opacity: 1; pointer-events: all; }
+
+  .chat-header {
+    background: var(--brand); color: var(--white);
+    padding: 14px 18px; display: flex; align-items: center; gap: 10px;
+  }
+  .chat-header .avatar { width: 34px; height: 34px; border-radius: 50%; background: rgba(255,255,255,.25); display: flex; align-items: center; justify-content: center; font-size: 16px; }
+  .chat-header .info { flex: 1; }
+  .chat-header .info strong { font-size: 14px; display: block; }
+  .chat-header .info span { font-size: 12px; opacity: .8; }
+  .chat-header .close-btn { background: none; border: none; color: var(--white); font-size: 20px; cursor: pointer; opacity: .8; line-height: 1; padding: 0; }
+  .chat-header .close-btn:hover { opacity: 1; }
+
+  /* Step 1 — contact form */
+  #chat-form { padding: 20px 18px; display: flex; flex-direction: column; gap: 12px; }
+  #chat-form .form-intro { font-size: 13px; color: var(--muted); line-height: 1.5; margin-bottom: 2px; }
+  #chat-form label { font-size: 12px; font-weight: 600; color: var(--text); display: block; margin-bottom: 4px; }
+  #chat-form input, #chat-form textarea {
+    width: 100%; border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 12px; font-size: 14px; font-family: inherit;
+    color: var(--text); background: var(--white);
+    transition: border-color .15s; outline: none;
+    resize: none;
+  }
+  #chat-form input:focus, #chat-form textarea:focus { border-color: var(--brand); }
+  #chat-form .start-btn {
+    background: var(--brand); color: var(--white); border: none;
+    border-radius: 8px; padding: 11px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: background .15s; margin-top: 2px;
+  }
+  #chat-form .start-btn:hover:not(:disabled) { background: var(--brand-dark); }
+  #chat-form .start-btn:disabled { opacity: .6; cursor: not-allowed; }
+  #chat-form .form-error { font-size: 12px; color: var(--brand); display: none; }
+
+  /* Step 2 — chat thread */
+  #chat-thread { display: none; flex-direction: column; flex: 1; min-height: 0; }
+  #chat-messages {
+    flex: 1; overflow-y: auto; padding: 16px;
+    display: flex; flex-direction: column; gap: 10px;
+    max-height: 340px;
+  }
+  .msg { max-width: 82%; padding: 10px 13px; border-radius: 12px; font-size: 14px; line-height: 1.5; word-break: break-word; }
+  .msg.agent { background: var(--bg); color: var(--text); border-bottom-left-radius: 3px; align-self: flex-start; }
+  .msg.visitor { background: var(--brand); color: var(--white); border-bottom-right-radius: 3px; align-self: flex-end; }
+  .msg.typing { background: var(--bg); align-self: flex-start; }
+  .typing-dots { display: flex; gap: 4px; padding: 2px 0; }
+  .typing-dots span { width: 7px; height: 7px; background: var(--muted); border-radius: 50%; animation: bounce .9s infinite; }
+  .typing-dots span:nth-child(2) { animation-delay: .15s; }
+  .typing-dots span:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-5px); } }
+
+  #call-button-bar {
+    display: none; padding: 10px 14px; background: #f0fdf4; border-top: 1px solid #bbf7d0;
+    align-items: center; gap: 10px;
+  }
+  #call-button-bar .call-label { font-size: 13px; color: #166534; flex: 1; }
+  #btn-start-call, #btn-mute {
+    background: #16a34a; color: white; border: none; border-radius: 8px;
+    padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; transition: background .15s;
+  }
+  #btn-start-call:hover:not(:disabled), #btn-mute:hover { background: #15803d; }
+  #btn-start-call:disabled { opacity: .55; cursor: not-allowed; }
+  #btn-mute.muted { background: #dc2626; }
+  #btn-mute.muted:hover { background: #b91c1c; }
+  #btn-start-call.active { background: #dc2626; }
+  #btn-start-call.active:hover:not(:disabled) { background: #b91c1c; }
+
+  #chat-input-row { border-top: 1px solid var(--border); display: flex; align-items: center; padding: 10px 12px; gap: 8px; }
+  #chat-input {
+    flex: 1; border: 1px solid var(--border); border-radius: 20px;
+    padding: 8px 14px; font-size: 14px; font-family: inherit; outline: none;
+    color: var(--text); transition: border-color .15s;
+    resize: none; max-height: 80px; overflow-y: auto;
+  }
+  #chat-input:focus { border-color: var(--brand); }
+  #chat-send {
+    width: 36px; height: 36px; border-radius: 50%; background: var(--brand);
+    border: none; cursor: pointer; display: flex; align-items: center; justify-content: center;
+    transition: background .15s; flex-shrink: 0;
+  }
+  #chat-send:hover:not(:disabled) { background: var(--brand-dark); }
+  #chat-send:disabled { opacity: .45; cursor: not-allowed; }
+  #chat-send svg { width: 16px; height: 16px; fill: white; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/@twilio/voice-sdk@2.18.2/dist/twilio.min.js"></script>
+</head>
+<body>
+
+<!-- Nav -->
+<nav>
+  <div class="nav-logo">
+    <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="16" cy="16" r="16" fill="#F22F46"/>
+      <ellipse cx="12" cy="13" rx="3" ry="4" fill="white"/>
+      <ellipse cx="20" cy="13" rx="3" ry="4" fill="white"/>
+      <circle cx="12" cy="13" r="1.5" fill="#0D122B"/>
+      <circle cx="20" cy="13" r="1.5" fill="#0D122B"/>
+      <path d="M10 20 Q16 25 22 20" stroke="white" stroke-width="1.8" stroke-linecap="round" fill="none"/>
+    </svg>
+    Owl Health
+  </div>
+  <div class="nav-links">
+    <a href="#">Services</a>
+    <a href="#">About</a>
+    <a href="#">Providers</a>
+    <a href="#">Contact</a>
+  </div>
+  <button class="nav-cta">Get Started</button>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <h1>Coordinated Care, <span>Delivered with Heart</span></h1>
+  <p>Owl Health connects members with personalized care coordination — proactive outreach, real-time support, and seamless follow-through.</p>
+  <div class="hero-btns">
+    <button class="btn-primary">Learn More</button>
+    <button class="btn-outline">Talk to Our Team</button>
+  </div>
+</section>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat"><div class="num">98%</div><div class="label">Member Satisfaction</div></div>
+  <div class="stat"><div class="num">50K+</div><div class="label">Members Served</div></div>
+  <div class="stat"><div class="num">24/7</div><div class="label">Care Access</div></div>
+  <div class="stat"><div class="num">300+</div><div class="label">Care Coordinators</div></div>
+</div>
+
+<!-- Services -->
+<div class="section">
+  <div class="section-title">
+    <h2>Our Care Services</h2>
+    <p>Comprehensive support programs designed around your health journey.</p>
+  </div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-icon">🩺</div>
+      <h3>Preventive Care Outreach</h3>
+      <p>Proactive scheduling reminders, wellness checks, and personalized health screenings to keep members ahead of health issues.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">💊</div>
+      <h3>Medication Management</h3>
+      <p>Adherence monitoring, refill coordination, and pharmacist consultations to ensure members stay on track with their prescriptions.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🏥</div>
+      <h3>Chronic Condition Support</h3>
+      <p>Dedicated care teams for diabetes, hypertension, heart disease, and other chronic conditions with ongoing monitoring.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧠</div>
+      <h3>Behavioral Health</h3>
+      <p>Mental health navigation, crisis support, and connection to in-network therapists and psychiatric services.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔗</div>
+      <h3>Care Transitions</h3>
+      <p>Post-discharge follow-up, specialist referral coordination, and continuity planning to prevent readmissions.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">📱</div>
+      <h3>Digital Health Tools</h3>
+      <p>Member portal, SMS check-ins, and AI-powered chat support available around the clock for immediate assistance.</p>
+    </div>
+  </div>
+</div>
+
+<!-- CTA band -->
+<div class="cta-band">
+  <h2>Ready to improve your health outcomes?</h2>
+  <p>Our care coordinators are standing by. Chat with us now or call to get started.</p>
+  <button class="btn-primary">Contact a Coordinator</button>
+</div>
+
+<!-- Footer -->
+<footer>
+  &copy; 2025 Owl Health, Inc. · Privacy Policy · Terms of Service · 1-800-OWL-HLTH
+</footer>
+
+<!-- Chat bubble -->
+<button id="chat-bubble" title="Chat with us">💬</button>
+
+<!-- Chat panel -->
+<div id="chat-panel">
+  <div class="chat-header">
+    <div class="avatar">🦉</div>
+    <div class="info">
+      <strong>Owl Health Support</strong>
+      <span>Typically replies in seconds</span>
+    </div>
+    <button class="close-btn" id="chat-close">✕</button>
+  </div>
+
+  <!-- Step 1: contact form -->
+  <form id="chat-form" autocomplete="off">
+    <p class="form-intro">Hi there! Let us know who you are and we'll connect you with a care coordinator right away.</p>
+    <div>
+      <label for="cf-name">Full Name</label>
+      <input id="cf-name" type="text" placeholder="Jane Doe" required />
+    </div>
+    <div>
+      <label for="cf-phone">Phone Number</label>
+      <input id="cf-phone" type="tel" placeholder="+1 (555) 000-0000" required />
+    </div>
+    <div>
+      <label for="cf-inquiry">How can we help?</label>
+      <textarea id="cf-inquiry" rows="3" placeholder="Describe your question or concern…" required></textarea>
+    </div>
+    <p class="form-error" id="cf-error"></p>
+    <button type="submit" class="start-btn" id="cf-submit">Start Chat →</button>
+  </form>
+
+  <!-- Step 2: chat thread -->
+  <div id="chat-thread">
+    <div id="chat-messages"></div>
+    <div id="call-button-bar">
+      <span class="call-label" id="call-label">Prefer to talk? Connect via voice.</span>
+      <button id="btn-mute" style="display:none">🎙 Mute</button>
+      <button id="btn-start-call">📞 Call Me</button>
+    </div>
+  <div id="chat-input-row">
+      <textarea id="chat-input" rows="1" placeholder="Type a message…"></textarea>
+      <button id="chat-send" disabled title="Send">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const bubble    = document.getElementById('chat-bubble');
+  const panel     = document.getElementById('chat-panel');
+  const closeBtn  = document.getElementById('chat-close');
+  const chatForm  = document.getElementById('chat-form');
+  const cfSubmit  = document.getElementById('cf-submit');
+  const cfError   = document.getElementById('cf-error');
+  const chatThread = document.getElementById('chat-thread');
+  const messages  = document.getElementById('chat-messages');
+  const chatInput = document.getElementById('chat-input');
+  const sendBtn   = document.getElementById('chat-send');
+
+  let convSid = null;
+  let visitorName = '';
+  let visitorPhone = '';
+  let eventSource = null;
+  let twilioDevice = null;
+  let activeCall = null;
+  let pendingCallData = null;  // { phone, profileId } set when agent signals schedule_call
+
+  const callBar    = document.getElementById('call-button-bar');
+  const callLabel  = document.getElementById('call-label');
+  const callBtn    = document.getElementById('btn-start-call');
+  const muteBtn    = document.getElementById('btn-mute');
+
+  muteBtn.addEventListener('click', () => {
+    if (!activeCall) return;
+    const muted = !activeCall.isMuted();
+    activeCall.mute(muted);
+    muteBtn.classList.toggle('muted', muted);
+    muteBtn.textContent = muted ? '🔇 Unmute' : '🎙 Mute';
+  });
+
+  // Toggle panel
+  function closeChat() {
+    panel.classList.remove('open');
+    callBar.style.display = 'none';
+    if (activeCall) { activeCall.disconnect(); activeCall = null; }
+    if (convSid) {
+      fetch('api/chat/close', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ conversationSid: convSid }),
+      }).catch(() => {});
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      convSid = null;
+    }
+  }
+
+  bubble.addEventListener('click', () => panel.classList.toggle('open'));
+  closeBtn.addEventListener('click', closeChat);
+  window.addEventListener('beforeunload', () => { if (convSid) closeChat(); });
+
+  // ── Step 1: submit contact form ──────────────────────────────────────────
+  chatForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name    = document.getElementById('cf-name').value.trim();
+    const phone   = document.getElementById('cf-phone').value.trim();
+    const inquiry = document.getElementById('cf-inquiry').value.trim();
+    if (!name || !phone || !inquiry) return;
+
+    cfSubmit.disabled = true;
+    cfSubmit.textContent = 'Connecting…';
+    cfError.style.display = 'none';
+
+    try {
+      console.log('[chat] starting chat for', phone);
+      const res = await fetch('api/chat/start', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name, phone, inquiry }),
+      });
+      const data = await res.json();
+      console.log('[chat] start response:', data);
+      if (!res.ok || !data.conversationSid) throw new Error(data.error || 'Failed to start chat');
+      convSid = data.conversationSid;
+      visitorPhone = phone;
+      visitorName = name;
+      // Open SSE stream, wait for connection, then send first message
+      listenForReplies();
+      await new Promise(r => setTimeout(r, 300));
+      switchToThread(inquiry);
+      // Send first message directly to TAC (bypasses Twilio webhook roundtrip)
+      await fetch('api/chat/message', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ conversationSid: convSid, body: inquiry, phone }),
+      });
+    } catch (err) {
+      console.error('[chat] start error:', err);
+      cfError.textContent = err.message || 'Could not connect. Please try again.';
+      cfError.style.display = 'block';
+      cfSubmit.disabled = false;
+      cfSubmit.textContent = 'Start Chat →';
+    }
+  });
+
+  function switchToThread(firstMessage) {
+    chatForm.style.display = 'none';
+    chatThread.style.display = 'flex';
+    addMessage(firstMessage, 'visitor');
+    addTyping();
+    sendBtn.disabled = false;
+  }
+
+  // ── SSE: listen for agent replies ────────────────────────────────────────
+  function listenForReplies() {
+    if (eventSource) eventSource.close();
+    console.log('[chat] opening SSE stream for conv', convSid);
+    eventSource = new EventSource(`api/chat/${convSid}/stream`);
+    eventSource.onopen = () => console.log('[chat] SSE stream connected');
+    eventSource.onmessage = (e) => {
+      console.log('[chat] SSE event:', e.data);
+      try {
+        const msg = JSON.parse(e.data);
+        removeTyping();
+        if (msg.body) {
+          addMessage(msg.body, 'agent');
+        }
+        if (msg.showCallButton) showCallButton(msg.showCallButton);
+      } catch { /* ignore ping/keep-alive */ }
+    };
+    eventSource.onerror = (e) => console.warn('[chat] SSE error/reconnect', e);
+  }
+
+  // ── Step 2: send a follow-up message ────────────────────────────────────
+  async function sendMessage() {
+    const text = chatInput.value.trim();
+    if (!text || !convSid) return;
+    chatInput.value = '';
+    chatInput.style.height = 'auto';
+    addMessage(text, 'visitor');
+    addTyping();
+    sendBtn.disabled = true;
+
+    try {
+      console.log('[chat] sending message conv=', convSid, 'body=', text);
+      const res = await fetch('api/chat/message', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ conversationSid: convSid, body: text, phone: visitorPhone }),
+      });
+      const data = await res.json();
+      console.log('[chat] message response:', data);
+      if (!res.ok) throw new Error(data.error || 'Send failed');
+    } catch (err) {
+      console.error('[chat] send error:', err);
+      removeTyping();
+      addMessage('⚠ Message failed to send. Please try again.', 'agent');
+    } finally {
+      sendBtn.disabled = false;
+    }
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+  chatInput.addEventListener('input', () => {
+    chatInput.style.height = 'auto';
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 80) + 'px';
+  });
+
+  // ── Call button ───────────────────────────────────────────────────────────
+  function showCallButton(data) {
+    pendingCallData = data;
+    callLabel.textContent = 'Prefer to talk? Connect via voice.';
+    callBar.style.display = 'flex';
+    callBtn.textContent = '📞 Call Me';
+    callBtn.classList.remove('active');
+    callBtn.disabled = false;
+  }
+
+  callBtn.addEventListener('click', async () => {
+    if (activeCall) {
+      activeCall.disconnect();
+      // Cancel any pending Flex task created for this call
+      fetch('api/flex-cancel-task', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ profileId: pendingCallData?.profileId || '' }),
+      }).catch(() => {});
+      return;
+    }
+    if (!pendingCallData) return;
+    callBtn.disabled = true;
+    callBtn.textContent = '⏳ Connecting…';
+    try {
+      // Register browser as Twilio Client (soft phone)
+      if (!twilioDevice) {
+        const tokenRes = await fetch('api/browser-call-token');
+        const tokenData = await tokenRes.json();
+        if (!tokenData.token) throw new Error('No voice token');
+        twilioDevice = new Twilio.Device(tokenData.token, { logLevel: 1 });
+        twilioDevice.on('error', e => addMessage(`⚠ Call error: ${e.message}`, 'agent'));
+        await twilioDevice.register();
+      }
+      // Browser-originated call — microphone/speaker connects directly to agent
+      activeCall = await twilioDevice.connect({
+        params: {
+          profileId: pendingCallData.profileId || '',
+          phone: visitorPhone,
+          name: visitorName,
+          directToFlex: 'true',
+        },
+      });
+      callBtn.disabled = false;
+      callBtn.classList.add('active');
+      callBtn.textContent = '🔴 Hang Up';
+      callLabel.textContent = 'Connected — speaking with agent';
+      muteBtn.style.display = 'flex';
+      muteBtn.textContent = '🎙 Mute';
+      muteBtn.classList.remove('muted');
+      activeCall.on('disconnect', () => resetCallButton());
+      activeCall.on('error', () => resetCallButton());
+    } catch (err) {
+      console.error('[chat] call failed:', err);
+      callLabel.textContent = `Could not connect: ${err.message}`;
+      callBtn.disabled = false;
+      callBtn.textContent = '📞 Try Again';
+    }
+  });
+
+  function resetCallButton() {
+    activeCall = null;
+    callBar.style.display = 'none';
+    callBtn.classList.remove('active');
+    callBtn.textContent = '📞 Call Me';
+    callBtn.disabled = false;
+    muteBtn.style.display = 'none';
+    muteBtn.classList.remove('muted');
+    addMessage('Call ended. Feel free to continue chatting.', 'agent');
+  }
+
+  // ── DOM helpers ───────────────────────────────────────────────────────────
+  function addMessage(text, role) {
+    const div = document.createElement('div');
+    div.className = `msg ${role}`;
+    div.textContent = text;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function addTyping() {
+    removeTyping();
+    const div = document.createElement('div');
+    div.className = 'msg typing';
+    div.id = 'typing-indicator';
+    div.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function removeTyping() {
+    document.getElementById('typing-indicator')?.remove();
+  }
+</script>
+</body>
+</html>

@@ -11,7 +11,7 @@ def register_app_routes(app, cfg, voice_channel, pending_outbound_context,
                         twilio_client, _APP_BACKENDS, _push_transcript_event,
                         _lookup_profile_id, _prefetch_memory, _build_memory_context,
                         _build_sms_system_prompt, _invoke_agent, _write_sms_observation,
-                        _escalate_call_to_flex, PUBLIC_DOMAIN, APP_PORT, logger,
+                        _escalate_call_to_flex, FLEX_WORKFLOW_SID, PUBLIC_DOMAIN, APP_PORT, logger,
                         FastAPIWebSocketAdapter, websockets):
     px = cfg.route_prefix
 
@@ -60,14 +60,57 @@ def register_app_routes(app, cfg, voice_channel, pending_outbound_context,
         ws_url, callback_url = _urls(request)
         raw_to, raw_from = form.get("To", ""), form.get("From", "")
         is_outbound = bool(ctx)
+        # Include any custom params passed via device.connect() (e.g. profileId, phone from chat widget)
+        custom_params: dict = {"callSid": call_sid}
+        if conv_id:
+            custom_params["outboundConvId"] = conv_id
+        for key in ("profileId", "profile_id", "phone", "member_phone", "name", "member_name", "directToFlex"):
+            val = params.get(key) or form.get(key, "")
+            if val:
+                custom_params[key] = val
+
+        # Browser-originated call: To = TwiML App SID (AP...) — not a phone number.
+        # Substitute real phone numbers so CO participant registration works.
+        is_browser_call = raw_to.startswith("AP") or raw_from.startswith("client:")
+        if is_browser_call:
+            raw_to = cfg.phone_number
+            raw_from = (custom_params.get("phone") or custom_params.get("member_phone")
+                        or cfg.phone_number)
+            is_outbound = False  # treat as inbound: agent is "To", caller is "From"
+
+        # Direct-to-Flex: skip AI agent and enqueue straight into Flex workflow
+        if is_browser_call and custom_params.get("directToFlex") == "true" and FLEX_WORKFLOW_SID:
+            import json as _json_dtf
+            from xml.sax.saxutils import escape as _esc_dtf
+            member_phone = custom_params.get("phone") or custom_params.get("member_phone") or ""
+            profile_id = custom_params.get("profileId") or custom_params.get("profile_id") or ""
+            member_name = custom_params.get("name") or custom_params.get("member_name") or ""
+            task_attrs = _json_dtf.dumps({
+                "taskType": "voice",
+                "customerAddress": member_phone,
+                "from": member_phone,
+                "called": cfg.phone_number,
+                "name": member_name,
+                "memberProfileId": profile_id,
+                "direction": "inbound",
+            })
+            twiml_dtf = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                "<Response>"
+                f'<Enqueue workflowSid="{_esc_dtf(FLEX_WORKFLOW_SID)}">'
+                f"<Task>{_esc_dtf(task_attrs)}</Task>"
+                "</Enqueue>"
+                "</Response>"
+            )
+            return Response(content=twiml_dtf, media_type="application/xml")
+
         twiml = await voice_channel.handle_incoming_call(
             to_number=raw_from if is_outbound else raw_to,
             from_number=raw_to if is_outbound else raw_from,
             options={
                 "websocket_url": ws_url, "action_url": callback_url,
                 "welcome_greeting": greeting,
-                "custom_parameters": ({"outboundConvId": conv_id, "callSid": call_sid}
-                                      if conv_id else {"callSid": call_sid}),
+                "custom_parameters": custom_params,
             },
             call_sid=call_sid,
         )

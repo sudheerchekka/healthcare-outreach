@@ -37,7 +37,7 @@ from base64 import b64encode
 from xml.sax.saxutils import escape
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 
 from bedrock_agentcore.runtime import AgentCoreRuntimeClient
 from tac import TAC, TACConfig
@@ -74,6 +74,8 @@ TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_TAC_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_TAC_AUTH_TOKEN", "")
 ESCALATION_ENABLED = os.environ.get("ESCALATION_ENABLED", "false").lower() in ("1", "true", "yes")
 FLEX_HANDOFF_APPLICATION_SID = os.environ.get("TWILIO_FLEX_HANDOFF_APPLICATION_SID", "")
+FLEX_WORKFLOW_SID = os.environ.get("TWILIO_FLEX_WORKFLOW_SID", "")
+FLEX_WORKSPACE_SID = os.environ.get("TWILIO_FLEX_WORKSPACE_SID", "")
 
 from twilio.rest import Client as TwilioClient
 twilio_client: Optional[TwilioClient] = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if TWILIO_ACCOUNT_SID else None
@@ -379,6 +381,18 @@ greeting_cache: dict[str, str] = {}
 memory_context_cache: dict[str, str] = {}
 # Maps conv_id → route_prefix so shared endpoints can find the right app
 conv_app_map: dict[str, str] = {}
+# Maps profileId → route_prefix — survives conversation cleanup so CI webhook can still resolve app
+profile_app_map: dict[str, str] = {}
+
+# Chat channel: Classic Conversations SID (CH...) ↔ CO conversation ID
+chat_classic_to_co: dict[str, str] = {}
+chat_co_to_classic: dict[str, str] = {}
+
+# Tracks CO conv_ids that originated from browser/WebRTC calls (device.connect)
+# Used to pick the right Flex escalation path (Enqueue vs Application TwiML)
+browser_call_conv_ids: set[str] = set()
+flex_task_sid_map: dict[str, str] = {}          # conv_id → TaskRouter task SID for browser escalations
+flex_task_profile_map: dict[str, str] = {}      # profileId → task SID
 
 # ---------------------------------------------------------------------------
 # Escalation helpers
@@ -395,7 +409,37 @@ def _twilio_basic_auth_header() -> dict[str, str]:
 
 
 def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_queue: str,
-                               member_phone: str = "", member_name: str = "", member_profile_id: str = "") -> str:
+                               member_phone: str = "", member_name: str = "", member_profile_id: str = "",
+                               is_browser_call: bool = False, cfg_phone: str = "",
+                               browser_caller_id: str = "") -> str:
+    if is_browser_call and FLEX_WORKFLOW_SID:
+        import json as _json
+        # Browser/WebRTC: Studio always reads From from the live call (= "client:care-team-agent"),
+        # so the Studio flow path always produces invalid task attributes. Bypass Studio entirely
+        # with <Enqueue> which lets us set explicit task attributes including a real E.164 "from".
+        # Flex Conference Instruction uses task.from as caller ID — must be an E.164 number.
+        task_attrs = {
+            "taskType": "voice",
+            "customerAddress": member_phone or "",
+            "from": browser_caller_id or cfg_phone or "",
+            "callerId": browser_caller_id or cfg_phone or "",
+            "caller": member_phone or "",
+            "called": cfg_phone or "",
+            "name": member_name or "",
+            "memberProfileId": member_profile_id or "",
+            "reason": reason,
+            "direction": "inbound",
+        }
+        attrs_json = _json.dumps(task_attrs).replace('"', '&quot;')
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<Response>"
+            f'<Enqueue workflowSid="{escape(FLEX_WORKFLOW_SID)}">'
+            f'<Task attributes="{attrs_json}"/>'
+            "</Enqueue>"
+            "</Response>"
+        )
+    # PSTN calls: copyParentTo copies the real E.164 From automatically
     params = f'<Parameter name="reason" value="{escape(reason)}" />'
     if member_phone:
         params += f'<Parameter name="memberPhone" value="{escape(member_phone)}" />'
@@ -445,10 +489,12 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
     member_phone = ""
     member_profile_id = ""
     member_name = ""
+    browser_caller_id = ""
     if isinstance(map_entry, dict):
         member_phone = map_entry.get("phone", "")
         member_profile_id = map_entry.get("profileId", "")
         member_name = map_entry.get("name", "")
+        browser_caller_id = map_entry.get("browserCallerId", "")
     elif isinstance(map_entry, str):
         member_phone = map_entry
     # Fallback: pending_outbound_context may still have context if turn 1 hasn't run
@@ -460,16 +506,139 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
             member_phone = ctx.get("phone", "")
     logger.info(f"[escalation] resolved member_phone={member_phone or '(unknown)'} member_name={member_name or '(unknown)'} member_profile_id={member_profile_id or '(unknown)'}")
 
+    # Detect browser/WebRTC call: outbound_conversation_map entry has no "from_pstn" marker,
+    # and the conv originated from chat widget (phone stored but original From was client:xxx).
+    # Reliable signal: check if conv_id is in chat_classic_to_co values (chat-originated voice call)
+    # or if the map entry was set by the browser-call path (is_browser_caller flag stored at setup).
+    is_browser = conv_id in browser_call_conv_ids  # populated in _handle_setup for WebRTC calls
+    logger.info(f"[escalation] is_browser_call={is_browser} workflow_sid={FLEX_WORKFLOW_SID or '(not set)'}")
+
+    loop = asyncio.get_event_loop()
+
+    if is_browser and FLEX_WORKFLOW_SID:
+        # Browser/WebRTC escalation: <Enqueue> doesn't work on WebRTC calls.
+        # Instead: redirect the call into a named Twilio Conference (puts customer on hold),
+        # then create a TaskRouter task via REST API with conference.sid in task attributes.
+        # Flex accepts by joining the existing conference — no outbound dial needed, no From required.
+        import json as _json
+        import uuid as _uuid
+        conference_name = f"flex-escalation-{conv_id[-12:]}-{_uuid.uuid4().hex[:8]}"
+        cfg_phone = app_cfg.phone_number if app_cfg else ""
+
+        # Step 1: redirect the call into a conference
+        conf_status_callback = f"https://{PUBLIC_DOMAIN}/flex-conference-status?conv_id={conv_id}"
+        conf_twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<Response>"
+            "<Dial>"
+            f'<Conference startConferenceOnEnter="true" endConferenceOnExit="true" '
+            f'statusCallback="{conf_status_callback}" statusCallbackEvent="end" '
+            f'waitUrl="https://twimlets.com/holdmusic?Bucket=com.twilio.music.classical" '
+            f'beep="false">{escape(conference_name)}</Conference>'
+            "</Dial>"
+            "</Response>"
+        )
+        logger.info(f"[escalation] browser path: redirecting call_sid={call_sid} to conference={conference_name}")
+        update_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls/{call_sid}.json"
+        auth_headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
+
+        def _redirect_call() -> requests.Response:
+            return requests.post(update_url, data={"Twiml": conf_twiml}, headers=auth_headers, timeout=10)
+
+        try:
+            redirect_res = await loop.run_in_executor(None, _redirect_call)
+            logger.info(f"[escalation] call redirect status={redirect_res.status_code} body={redirect_res.text[:300]}")
+            if redirect_res.status_code >= 300:
+                logger.error(f"[escalation] call redirect failed — falling back to PSTN path")
+                is_browser = False  # fall through to PSTN path below
+        except Exception as e:
+            logger.error(f"[escalation] call redirect exception: {e}", exc_info=True)
+            is_browser = False
+
+        if is_browser:
+            # Step 2: wait briefly for conference to be created, then fetch its SID
+            await asyncio.sleep(1.5)
+            conf_list_url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Conferences.json?FriendlyName={conference_name}&Status=in-progress"
+
+            def _fetch_conference() -> requests.Response:
+                return requests.get(conf_list_url, headers=auth_headers, timeout=10)
+
+            conference_sid = ""
+            try:
+                conf_res = await loop.run_in_executor(None, _fetch_conference)
+                conf_data = conf_res.json()
+                conferences = conf_data.get("conferences", [])
+                if conferences:
+                    conference_sid = conferences[0].get("sid", "")
+                    logger.info(f"[escalation] conference_sid={conference_sid}")
+                else:
+                    logger.warning(f"[escalation] conference not found yet — creating task without conference SID")
+            except Exception as e:
+                logger.warning(f"[escalation] could not fetch conference SID: {e}")
+
+            # Step 3: create TaskRouter task via REST API with conference attribute
+            task_attrs = {
+                "taskType": "voice",
+                "customerAddress": member_phone or "",
+                "from": member_phone or "",
+                "caller": member_phone or "",
+                "called": cfg_phone or "",
+                "twilioNumber": cfg_phone or "",
+                "name": member_name or "",
+                "memberProfileId": member_profile_id or "",
+                "reason": reason,
+                "direction": "inbound",
+            }
+            if conference_sid:
+                task_attrs["conference"] = {
+                    "sid": conference_sid,
+                    "participants": {"customer": call_sid},
+                }
+
+            task_url = f"https://taskrouter.twilio.com/v1/Workspaces/{FLEX_WORKSPACE_SID}/Tasks"
+
+            def _create_task() -> requests.Response:
+                return requests.post(task_url, data={
+                    "WorkflowSid": FLEX_WORKFLOW_SID,
+                    "TaskChannel": "voice",
+                    "Attributes": _json.dumps(task_attrs),
+                }, headers=auth_headers, timeout=10)
+
+            try:
+                task_res = await loop.run_in_executor(None, _create_task)
+                logger.info(f"[escalation] TaskRouter task create status={task_res.status_code} body={task_res.text[:300]}")
+                if task_res.status_code < 300:
+                    task_data = task_res.json()
+                    task_sid = task_data.get("sid", "")
+                    if task_sid:
+                        flex_task_sid_map[conv_id] = task_sid
+                        if member_profile_id:
+                            flex_task_profile_map[member_profile_id] = task_sid
+                        logger.info(f"[escalation] stored task_sid={task_sid} conv_id={conv_id} profileId={member_profile_id}")
+                    logger.info(f"[escalation] ✓ browser escalation complete conv_id={conv_id}")
+                    try:
+                        await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
+                    except Exception as e:
+                        logger.error(f"[escalation] failed to close conversation: {e}")
+                    return True
+                else:
+                    logger.error(f"[escalation] task creation failed — status={task_res.status_code}")
+                    return False
+            except Exception as e:
+                logger.error(f"[escalation] task creation exception: {e}", exc_info=True)
+                return False
+
     twiml = _build_flex_transfer_twiml(conv_id, reason, urgency, effective_queue,
                                        member_phone=member_phone,
                                        member_name=member_name,
-                                       member_profile_id=member_profile_id)
+                                       member_profile_id=member_profile_id,
+                                       is_browser_call=False,
+                                       cfg_phone=app_cfg.phone_number if app_cfg else "",
+                                       browser_caller_id=browser_caller_id)
     logger.info(f"[escalation] TwiML: {twiml}")
     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls/{call_sid}.json"
     headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
     payload = {"Twiml": twiml}
-
-    loop = asyncio.get_event_loop()
 
     def _do_request() -> requests.Response:
         return requests.post(url, data=payload, headers=headers, timeout=10)
@@ -481,6 +650,7 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
             logger.error(f"[escalation] Twilio update failed status={res.status_code} conv_id={conv_id}")
             return False
         logger.info(f"[escalation] ✓ transferred conv_id={conv_id} call_sid={call_sid} reason={reason} urgency={urgency} queue={effective_queue}")
+
         try:
             await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
             logger.info(f"[escalation] closed Maestro conversation convId={conv_id}")
@@ -608,8 +778,13 @@ def _build_memory_context(memory: Optional[TACMemoryResponse], traits: Optional[
 
 async def _invoke_agent(session_id: str, prompt: str, system_prompt: str, context: str,
                         cfg: "AppConfig", member_phone: str = "", profile_id: str = "",
-                        member_traits: Optional[dict] = None) -> str:
-    """Invoke the app's agent backend and return the full reply text."""
+                        member_traits: Optional[dict] = None,
+                        on_schedule_call=None) -> str:
+    """Invoke the app's agent backend and return the full reply text.
+
+    on_schedule_call: optional async callable(phone, reason) injected by chat channel
+    so it can show a call button in the widget instead of auto-dialing.
+    """
     backend = _APP_BACKENDS[cfg.route_prefix]
     tokens: list[str] = []
     async for data in backend.invoke(
@@ -631,14 +806,17 @@ async def _invoke_agent(session_id: str, prompt: str, system_prompt: str, contex
         elif msg_type == "schedule_call":
             sc_phone = str(data.get("phone", "")) or member_phone
             sc_reason = str(data.get("reason", ""))
-            logger.info(f"[{cfg.id}][schedule_call] sms: agent requested call profile_id={profile_id} phone={sc_phone} reason={sc_reason}")
-            asyncio.create_task(_trigger_outbound_call_by_profile(profile_id, sc_phone, sc_reason, cfg=cfg, traits=member_traits or {}))
+            logger.info(f"[{cfg.id}][schedule_call] agent requested call profile_id={profile_id} phone={sc_phone} reason={sc_reason}")
+            if on_schedule_call:
+                await on_schedule_call(sc_phone, sc_reason)
+            else:
+                asyncio.create_task(_trigger_outbound_call_by_profile(profile_id, sc_phone, sc_reason, cfg=cfg, traits=member_traits or {}))
         elif msg_type == "tool_start":
-            logger.info(f"[agent] sms tool_start tool={data.get('tool')}")
+            logger.info(f"[agent] tool_start tool={data.get('tool')}")
         elif msg_type == "tool_result":
-            logger.info(f"[agent] sms tool_result status={data.get('status')}")
+            logger.info(f"[agent] tool_result status={data.get('status')}")
         else:
-            logger.info(f"[agent] sms msg type={msg_type} data={str(data)[:200]}")
+            logger.info(f"[agent] msg type={msg_type} data={str(data)[:200]}")
     return "".join(tokens).strip()
 
 
@@ -737,6 +915,15 @@ def _build_sms_system_prompt(cfg: "AppConfig") -> str:
     return _build_inbound_system_prompt(cfg)
 
 
+def _build_chat_system_prompt(cfg: "AppConfig") -> str:
+    chat_file = pathlib.Path(__file__).parent / "system_prompt_chat.txt"
+    if chat_file.exists():
+        text = chat_file.read_text().strip()
+        if text:
+            return text
+    return _build_sms_system_prompt(cfg)
+
+
 async def _prewarm(conv_id: str, session_id: str, phone: str, cfg: "AppConfig") -> None:
     """Pre-warm agent backend and fetch memory before the member speaks."""
     t0 = time.time()
@@ -794,6 +981,7 @@ class OwlVoiceChannel(VoiceChannel):
         cfg = _app_for_conv(conv_id)
 
         call_sid = extra.get("callSid", "")
+        logger.info(f"[setup] extra keys={list(extra.keys())} callSid={call_sid!r} parentCallSid={extra.get('parentCallSid')!r}")
         if call_sid:
             conversation_call_sid_map[conv_id] = call_sid
         elif outbound_conv_id and outbound_conv_id in pending_call_sid_map:
@@ -802,21 +990,32 @@ class OwlVoiceChannel(VoiceChannel):
             logger.info(f"[setup] call_sid mapped conv_id={conv_id} call_sid={conversation_call_sid_map[conv_id]}")
 
         ctx = pending_outbound_context.get(conv_id)
-        phone = ctx.get("phone", "") if ctx else (message.from_number or "")
+        # For browser-originated calls, the real member phone comes via custom params
+        # (device.connect params → TwiML custom_parameters), not from_number
+        extra_phone = extra.get("phone") or extra.get("member_phone") or ""
+        raw_from_num = message.from_number or ""
+        is_browser_caller = raw_from_num.startswith("client:") or not raw_from_num
+        if is_browser_caller:
+            browser_call_conv_ids.add(conv_id)
+        phone = (ctx.get("phone", "") if ctx
+                 else (extra_phone if is_browser_caller else raw_from_num))
+        logger.info(f"[setup] phone resolved={phone!r} from_number={raw_from_num!r} extra_phone={extra_phone!r} is_browser={is_browser_caller}")
 
         member_profile_id: Optional[str] = None
-        if ctx and phone and cfg:
+        if phone and cfg:
             member_profile_id = _lookup_profile_id(phone, cfg)
-            session_id = member_profile_id or message.custom_parameters.profile_id or conv_id
+            session_id = member_profile_id or conv_id
             if member_profile_id:
-                logger.info(f"[setup] outbound session resolved to member profile {member_profile_id} for phone={phone}")
+                logger.info(f"[setup] session resolved to member profile {member_profile_id} for phone={phone}")
         else:
-            session_id = message.custom_parameters.profile_id or conv_id
+            session_id = conv_id
 
-        if ctx and phone:
-            outbound_conversation_map[conv_id] = {"phone": phone, "profileId": member_profile_id or ""}
+        if phone:
+            outbound_conversation_map[conv_id] = {"phone": phone, "profileId": member_profile_id or "", "browserCallerId": raw_from_num if is_browser_caller else ""}
             logger.info(f"[setup] outbound_conversation_map[{conv_id}] phone={phone} profileId={member_profile_id or '(pending)'}")
-            greeting = ctx.get("greeting", "")
+            if member_profile_id and cfg:
+                profile_app_map[member_profile_id] = cfg.route_prefix
+            greeting = ctx.get("greeting", "") if ctx else ""
             if greeting and member_profile_id:
                 asyncio.get_event_loop().create_task(
                     _push_transcript_event(member_profile_id, "agent", greeting),
@@ -871,8 +1070,12 @@ async def handle_message_ready(
             logger.info(f"[{cfg.id}] outbound ctx applied conv_id={conv_id} member={ctx['name']}")
         else:
             system_prompt_cache[conv_id] = _build_inbound_system_prompt(cfg)
-            phone = (context.author_info.address if context.author_info else "") or ""
-            logger.info(f"[{cfg.id}] inbound session conv_id={conv_id} from={phone}")
+            author_addr = (context.author_info.address if context.author_info else "") or ""
+            # Browser calls have author address like "client:xxx" — use the phone stored during setup
+            map_entry = outbound_conversation_map.get(conv_id)
+            stored_phone = map_entry.get("phone", "") if isinstance(map_entry, dict) else (map_entry or "")
+            phone = stored_phone if (not author_addr or author_addr.startswith("client:")) else author_addr
+            logger.info(f"[{cfg.id}] inbound session conv_id={conv_id} phone={phone!r} author_addr={author_addr!r}")
 
         if conv_id in memory_context_cache:
             mem_ctx = memory_context_cache[conv_id]
@@ -971,6 +1174,7 @@ async def handle_conversation_ended(context: ConversationSession) -> None:
     memory_context_cache.pop(conv_id, None)
     conversation_call_sid_map.pop(conv_id, None)
     conv_app_map.pop(conv_id, None)
+    browser_call_conv_ids.discard(conv_id)
     logger.info(f"[{cfg.id if cfg else '?'}] cleaned up conv_id={conv_id}")
 
     try:
@@ -999,6 +1203,13 @@ tac.on_interrupt(handle_interrupt)
 
 app = FastAPI()
 
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 from _routes import register_app_routes
 
@@ -1019,6 +1230,7 @@ for _app_cfg in ALL_APPS.values():
         _invoke_agent=_invoke_agent,
         _write_sms_observation=_write_sms_observation,
         _escalate_call_to_flex=_escalate_call_to_flex,
+        FLEX_WORKFLOW_SID=FLEX_WORKFLOW_SID,
         PUBLIC_DOMAIN=PUBLIC_DOMAIN,
         APP_PORT=APP_PORT,
         logger=logger,
@@ -1031,10 +1243,16 @@ for _app_cfg in ALL_APPS.values():
 async def get_outbound_phone(conv_id: str) -> dict:
     """Shared — Node.js CI webhook resolves member phone + profileId from any app."""
     entry = outbound_conversation_map.get(conv_id)
+    app_prefix = conv_app_map.get(conv_id, "")
+    profile_id_from_entry = entry.get("profileId", "") if isinstance(entry, dict) else ""
+    if not app_prefix and profile_id_from_entry:
+        app_prefix = profile_app_map.get(profile_id_from_entry, "")
+    app_cfg = ALL_APPS.get(app_prefix)
+    app_id = app_cfg.id if app_cfg else ""
     if isinstance(entry, dict):
-        return {"phone": entry.get("phone", ""), "profileId": entry.get("profileId", "")}
+        return {"phone": entry.get("phone", ""), "profileId": entry.get("profileId", ""), "appId": app_id}
     if isinstance(entry, str):
-        return {"phone": entry, "profileId": ""}
+        return {"phone": entry, "profileId": "", "appId": app_id}
     # Fallback: look up participants via Conversations API (elevenlabs path)
     if conv_id.startswith("conv_conversation_"):
         cfg = next(iter(ALL_APPS.values())) if ALL_APPS else None
@@ -1234,9 +1452,506 @@ async def sms_shared(request: Request) -> Response:
     return empty_twiml
 
 
+# Maps conversation SID → app route_prefix (populated when chat session starts)
+_CONV_SID_TO_APP: dict[str, str] = {}
+
+
+@app.post("/register-conversation")
+async def register_conversation(request: Request) -> dict:
+    """Node.js calls this after creating a Twilio Conversation so TAC knows which app to use."""
+    body = await request.json()
+    conv_sid = body.get("conversationSid", "")
+    app_id   = body.get("appId", "")
+    if not conv_sid:
+        return {"success": False, "error": "conversationSid required"}
+    cfg = next((c for c in ALL_APPS.values() if c.id == app_id), None)
+    if not cfg and ALL_APPS:
+        cfg = next(iter(ALL_APPS.values()))
+    if cfg:
+        _CONV_SID_TO_APP[conv_sid] = cfg.route_prefix
+        logger.info(f"[chat] registered conv_sid={conv_sid} app={cfg.id}")
+    return {"success": bool(cfg)}
+
+
+@app.post("/conversations-webhook")
+async def conversations_webhook(request: Request) -> dict:
+    """Twilio Conversations webhook — fires on onMessageAdded for Classic Conversations service."""
+    form = dict(await request.form())
+    conv_sid   = str(form.get("ConversationSid", ""))
+    author     = str(form.get("Author", ""))
+    body_text  = str(form.get("Body", "")).strip()
+    event_type = str(form.get("EventType", ""))
+
+    logger.info(f"[chat] webhook event={event_type} conv_sid={conv_sid} author={author} body=\"{body_text[:80]}\"")
+
+    # Only process new inbound messages; skip agent echo
+    if event_type != "onMessageAdded":
+        return {"success": True}
+    if author in ("agent", "") or author.startswith("agent_"):
+        return {"success": True}
+    if not body_text:
+        return {"success": True}
+
+    # Resolve app config
+    prefix = _CONV_SID_TO_APP.get(conv_sid)
+    cfg = ALL_APPS.get(prefix) if prefix else None
+    if not cfg and ALL_APPS:
+        cfg = next(iter(ALL_APPS.values()))
+        logger.warning(f"[chat] conv_sid={conv_sid} not registered — falling back to app={cfg.id}")
+    if not cfg:
+        logger.error("[chat] no app config available")
+        return {"success": False}
+
+    visitor_phone = author  # identity was set to phone number at participant creation
+
+    loop = asyncio.get_event_loop()
+    profile_id = await loop.run_in_executor(None, _lookup_profile_id, visitor_phone, cfg)
+    if not profile_id:
+        logger.warning(f"[chat] no profile for phone={visitor_phone} — using conv_sid as session key")
+        profile_id = conv_sid
+
+    # ── Bridge into Conversation Orchestrator ────────────────────────────────
+    co_conv_id = chat_classic_to_co.get(conv_sid)
+    if not co_conv_id:
+        logger.info(f"[{cfg.id}][chat] creating CO conversation for conv_sid={conv_sid}")
+        try:
+            from tac.models import ParticipantAddress
+            co_conv = await tac.maestro_client.create_conversation(
+                name=f"webchat-{visitor_phone}-{conv_sid[-8:]}"
+            )
+            co_conv_id = co_conv.id
+            chat_classic_to_co[conv_sid] = co_conv_id
+            chat_co_to_classic[co_conv_id] = conv_sid
+
+            await tac.maestro_client.add_participant(
+                conversation_id=co_conv_id,
+                addresses=[ParticipantAddress(channel="CHAT", address=visitor_phone, channelId=conv_sid)],
+                participant_type="CUSTOMER",
+            )
+            await tac.maestro_client.add_participant(
+                conversation_id=co_conv_id,
+                addresses=[ParticipantAddress(channel="CHAT", address=cfg.phone_number or visitor_phone, channelId=conv_sid)],
+                participant_type="AI_AGENT",
+            )
+            conv_app_map[co_conv_id] = cfg.route_prefix
+            outbound_conversation_map[co_conv_id] = {
+                "phone": visitor_phone, "profileId": profile_id, "name": ""
+            }
+            logger.info(f"[{cfg.id}][chat] CO conversation created co_conv_id={co_conv_id}")
+        except Exception as e:
+            logger.error(f"[{cfg.id}][chat] CO conversation creation failed: {e}", exc_info=True)
+            co_conv_id = conv_sid  # fall back to classic SID as session key
+    else:
+        logger.info(f"[{cfg.id}][chat] using existing CO conversation co_conv_id={co_conv_id}")
+
+    # ── Invoke agent via CO session ──────────────────────────────────────────
+    backend = _APP_BACKENDS[cfg.route_prefix]
+    memory_task  = asyncio.create_task(_prefetch_memory(visitor_phone, cfg, profile_id=profile_id))
+    prewarm_task = asyncio.create_task(backend.prewarm(co_conv_id))
+    (memory, traits), _ = await asyncio.gather(memory_task, prewarm_task)
+
+    context       = _build_memory_context(memory, traits)
+    system_prompt = _build_sms_system_prompt(cfg)
+
+    try:
+        reply_text = await _invoke_agent(
+            session_id=co_conv_id,  # CO conv ID as session — gives CO continuity
+            prompt=body_text,
+            system_prompt=system_prompt,
+            context=context,
+            cfg=cfg,
+            member_phone=visitor_phone,
+            profile_id=profile_id,
+            member_traits=traits,
+        )
+    except Exception as e:
+        logger.error(f"[{cfg.id}][chat] agent invocation failed: {e}", exc_info=True)
+        return {"success": False}
+
+    logger.info(f"[{cfg.id}][chat] reply co_conv_id={co_conv_id} \"{reply_text[:120]}\"")
+
+    # ── Send reply via Classic Conversations (browser receives it) ───────────
+    chat_service_sid = os.environ.get("TWILIO_CHAT_CONVERSATION_SERVICE_SID", "")
+    if not chat_service_sid:
+        logger.warning(f"[{cfg.id}][chat] TWILIO_CHAT_CONVERSATION_SERVICE_SID not set — cannot send reply")
+    elif twilio_client:
+        try:
+            twilio_client.conversations.v1 \
+                .services(chat_service_sid) \
+                .conversations(conv_sid) \
+                .messages.create(author="agent", body=reply_text)
+            logger.info(f"[{cfg.id}][chat] reply sent to Classic Conversations conv_sid={conv_sid}")
+        except Exception as e:
+            logger.error(f"[{cfg.id}][chat] Classic Conversations send failed: {e}")
+
+    # ── Push reply to browser via Node.js SSE fanout ─────────────────────────
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"http://localhost:{APP_PORT}{cfg.route_prefix}/chat-message-event",
+                json={"conversationSid": conv_sid, "body": reply_text, "author": "agent"},
+                timeout=5,
+            )
+    except Exception as e:
+        logger.warning(f"[{cfg.id}][chat] SSE fanout failed: {e}")
+
+    return {"success": True}
+
+
+@app.post("/chat-message")
+async def chat_message(request: Request) -> dict:
+    """Direct entry point from Node.js for web chat messages — bypasses Twilio webhook roundtrip."""
+    body = await request.json()
+    conv_sid  = body.get("conversationSid", "")
+    body_text = body.get("body", "").strip()
+    author    = body.get("author", "")  # visitor phone number
+
+    if not conv_sid or not body_text:
+        return {"success": False, "error": "conversationSid and body required"}
+
+    # Resolve app config
+    prefix = _CONV_SID_TO_APP.get(conv_sid)
+    cfg = ALL_APPS.get(prefix) if prefix else None
+    if not cfg and ALL_APPS:
+        cfg = next(iter(ALL_APPS.values()))
+    if not cfg:
+        return {"success": False, "error": "no app config"}
+
+    visitor_phone = author or ""
+    logger.info(f"[{cfg.id}][chat] direct message conv_sid={conv_sid} phone={visitor_phone} body=\"{body_text[:80]}\"")
+
+    # Write visitor message to Classic Conversations
+    chat_service_sid = os.environ.get("TWILIO_CHAT_CONVERSATION_SERVICE_SID", "")
+    if twilio_client and chat_service_sid:
+        try:
+            twilio_client.conversations.v1 \
+                .services(chat_service_sid) \
+                .conversations(conv_sid) \
+                .messages.create(author=visitor_phone or "visitor", body=body_text)
+            logger.info(f"[{cfg.id}][chat] visitor message written to Classic Conversations")
+        except Exception as e:
+            logger.warning(f"[{cfg.id}][chat] write visitor message failed (non-fatal): {e}")
+
+    # Look up profile
+    loop = asyncio.get_event_loop()
+    profile_id = await loop.run_in_executor(None, _lookup_profile_id, visitor_phone, cfg) if visitor_phone else None
+    if not profile_id:
+        profile_id = conv_sid
+        logger.warning(f"[{cfg.id}][chat] no profile for phone={visitor_phone} — using conv_sid")
+
+    # Bridge into CO (create on first message, reuse on subsequent)
+    co_conv_id = chat_classic_to_co.get(conv_sid)
+    if not co_conv_id:
+        logger.info(f"[{cfg.id}][chat] creating CO conversation conv_sid={conv_sid}")
+        try:
+            from tac.models import ParticipantAddress
+            co_conv = await tac.maestro_client.create_conversation(
+                name=f"webchat-{visitor_phone}-{conv_sid[-8:]}"
+            )
+            co_conv_id = co_conv.id
+            chat_classic_to_co[conv_sid] = co_conv_id
+            chat_co_to_classic[co_conv_id] = conv_sid
+            await tac.maestro_client.add_participant(
+                conversation_id=co_conv_id,
+                addresses=[ParticipantAddress(channel="CHAT", address=visitor_phone, channelId=conv_sid)],
+                participant_type="CUSTOMER",
+            )
+            await tac.maestro_client.add_participant(
+                conversation_id=co_conv_id,
+                addresses=[ParticipantAddress(channel="CHAT", address=cfg.phone_number or visitor_phone, channelId=conv_sid)],
+                participant_type="AI_AGENT",
+            )
+            conv_app_map[co_conv_id] = cfg.route_prefix
+            outbound_conversation_map[co_conv_id] = {"phone": visitor_phone, "profileId": profile_id, "name": ""}
+            logger.info(f"[{cfg.id}][chat] CO conversation created co_conv_id={co_conv_id}")
+        except Exception as e:
+            logger.error(f"[{cfg.id}][chat] CO creation failed: {e}", exc_info=True)
+            co_conv_id = conv_sid  # fall back to classic SID
+    else:
+        logger.info(f"[{cfg.id}][chat] reusing CO conversation co_conv_id={co_conv_id}")
+
+    # Invoke agent
+    backend = _APP_BACKENDS[cfg.route_prefix]
+    memory_task  = asyncio.create_task(_prefetch_memory(visitor_phone, cfg, profile_id=profile_id))
+    prewarm_task = asyncio.create_task(backend.prewarm(co_conv_id))
+    (memory, traits), _ = await asyncio.gather(memory_task, prewarm_task)
+
+    context       = _build_memory_context(memory, traits)
+    system_prompt = _build_chat_system_prompt(cfg)
+
+    # on_schedule_call: push a show_call_button event to the browser instead of auto-dialing
+    call_button_signal: dict = {}
+
+    async def _on_schedule_call(phone: str, reason: str) -> None:
+        call_button_signal["phone"] = phone
+        call_button_signal["reason"] = reason
+        call_button_signal["profileId"] = profile_id
+        logger.info(f"[{cfg.id}][chat] schedule_call signal — will show call button phone={phone}")
+
+    try:
+        reply_text = await _invoke_agent(
+            session_id=co_conv_id,
+            prompt=body_text,
+            system_prompt=system_prompt,
+            context=context,
+            cfg=cfg,
+            member_phone=visitor_phone,
+            profile_id=profile_id,
+            member_traits=traits,
+            on_schedule_call=_on_schedule_call,
+        )
+    except Exception as e:
+        logger.error(f"[{cfg.id}][chat] agent invocation failed: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+    logger.info(f"[{cfg.id}][chat] reply co_conv_id={co_conv_id} \"{reply_text[:120]}\"")
+
+    # Write agent reply to Classic Conversations
+    if twilio_client and chat_service_sid:
+        try:
+            twilio_client.conversations.v1 \
+                .services(chat_service_sid) \
+                .conversations(conv_sid) \
+                .messages.create(author="agent", body=reply_text)
+            logger.info(f"[{cfg.id}][chat] agent reply written to Classic Conversations")
+        except Exception as e:
+            logger.error(f"[{cfg.id}][chat] write agent reply failed: {e}")
+
+    # Push reply + optional call button signal to browser via Node.js SSE fanout
+    try:
+        async with httpx.AsyncClient() as client:
+            payload: dict = {"conversationSid": conv_sid, "body": reply_text, "author": "agent"}
+            if call_button_signal:
+                payload["showCallButton"] = call_button_signal
+            await client.post(
+                f"http://localhost:{APP_PORT}{cfg.route_prefix}/chat-message-event",
+                json=payload,
+                timeout=5,
+            )
+    except Exception as e:
+        logger.warning(f"[{cfg.id}][chat] SSE fanout failed: {e}")
+
+    return {"success": True}
+
+
+@app.post("/chat-close")
+async def chat_close(request: Request) -> dict:
+    """Browser calls this when the chat widget is closed — closes the CO conversation."""
+    body = await request.json()
+    classic_sid = body.get("conversationSid", "")
+    co_conv_id = chat_classic_to_co.pop(classic_sid, None)
+    if co_conv_id:
+        chat_co_to_classic.pop(co_conv_id, None)
+        conv_app_map.pop(co_conv_id, None)
+        outbound_conversation_map.pop(co_conv_id, None)
+        try:
+            await tac.maestro_client.update_conversation(co_conv_id, status="CLOSED")
+            logger.info(f"[chat] CO conversation closed co_conv_id={co_conv_id}")
+        except Exception as e:
+            logger.warning(f"[chat] close CO conv failed: {e}")
+    return {"success": True}
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "healthy", "apps": list(ALL_APPS.keys())}
+
+
+@app.post("/flex-assignment-callback")
+async def flex_assignment_callback(request: Request) -> Response:
+    """TaskRouter assignment callback for browser-call Flex tasks.
+    Returns a dequeue instruction with an explicit 'from' so Flex can
+    dial the worker into the conference without needing caller_id in worker attributes."""
+    form = dict(await request.form())
+    task_attrs_raw = form.get("TaskAttributes", "{}")
+    worker_attrs_raw = form.get("WorkerAttributes", "{}")
+    try:
+        import json as _json
+        task_attrs = _json.loads(task_attrs_raw)
+        worker_attrs = _json.loads(worker_attrs_raw)
+    except Exception:
+        task_attrs = {}
+        worker_attrs = {}
+
+    called = task_attrs.get("called", "")
+    contact_uri = worker_attrs.get("contact_uri", "")
+    logger.info(f"[flex-assignment] called={called!r} contact_uri={contact_uri!r} task_attrs={task_attrs}")
+
+    instruction = {
+        "instruction": "dequeue",
+        "from": called,          # Twilio number (called = cfg_phone)
+        "post_work_activity_sid": "",
+    }
+    if contact_uri:
+        instruction["to"] = contact_uri
+
+    return Response(content=_json.dumps(instruction), media_type="application/json")
+
+
+@app.post("/flex-dequeue-reservation")
+async def flex_dequeue_reservation(request: Request) -> Response:
+    """Proxy the TaskRouter dequeue instruction from the Flex plugin.
+    Browser JS can't call taskrouter.twilio.com directly due to CORS."""
+    import json as _json
+    body = await request.json()
+    workspace_sid = body.get("workspaceSid", "")
+    task_sid = body.get("taskSid", "")
+    reservation_sid = body.get("reservationSid", "")
+    dequeue_from = body.get("dequeueFrom", "")
+    dequeue_to = body.get("dequeueTo", "")
+
+    if not all([workspace_sid, task_sid, reservation_sid, dequeue_from]):
+        return Response(content=_json.dumps({"error": "missing required fields"}), status_code=400, media_type="application/json")
+
+    url = f"https://taskrouter.twilio.com/v1/Workspaces/{workspace_sid}/Tasks/{task_sid}/Reservations/{reservation_sid}"
+    data: dict = {"Instruction": "dequeue", "DequeueFrom": dequeue_from}
+    if dequeue_to:
+        data["DequeueTo"] = dequeue_to
+
+    auth_headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
+
+    def _do() -> requests.Response:
+        return requests.post(url, data=data, headers=auth_headers, timeout=10)
+
+    try:
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, _do)
+        logger.info(f"[flex-dequeue] status={res.status_code} task={task_sid} reservation={reservation_sid}")
+        return Response(content=res.text, status_code=res.status_code, media_type="application/json")
+    except Exception as e:
+        logger.error(f"[flex-dequeue] error: {e}")
+        return Response(content=_json.dumps({"error": str(e)}), status_code=500, media_type="application/json")
+
+
+@app.post("/flex-cancel-task")
+async def flex_cancel_task(request: Request) -> dict:
+    """Cancel a pending Flex task by profileId — called when browser call hangs up."""
+    body = await request.json()
+    profile_id = body.get("profileId", "")
+    task_sid = flex_task_profile_map.pop(profile_id, "") if profile_id else ""
+    # Also clean up conv_id keyed entry
+    stale = [k for k, v in flex_task_sid_map.items() if v == task_sid]
+    for k in stale:
+        flex_task_sid_map.pop(k, None)
+
+    logger.info(f"[flex-cancel-task] profileId={profile_id} task_sid={task_sid or '(not found)'}")
+    if not task_sid or not FLEX_WORKSPACE_SID:
+        return {"success": False, "reason": "no task found"}
+
+    task_url = f"https://taskrouter.twilio.com/v1/Workspaces/{FLEX_WORKSPACE_SID}/Tasks/{task_sid}"
+    auth_headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
+
+    def _cancel() -> requests.Response:
+        return requests.post(task_url, data={"AssignmentStatus": "canceled", "Reason": "customer_hangup"}, headers=auth_headers, timeout=10)
+
+    try:
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, _cancel)
+        logger.info(f"[flex-cancel-task] status={res.status_code} task_sid={task_sid}")
+        return {"success": res.status_code < 300}
+    except Exception as e:
+        logger.error(f"[flex-cancel-task] error: {e}")
+        return {"success": False}
+
+
+@app.post("/flex-conference-status")
+async def flex_conference_status(request: Request) -> dict:
+    """Called by Twilio when the escalation conference ends (customer hung up).
+    Cancels the pending TaskRouter task so it doesn't linger in Flex."""
+    params = dict(await request.form())
+    conv_id = request.query_params.get("conv_id", "")
+    status_event = params.get("StatusCallbackEvent", params.get("ReasonConferenceEnded", ""))
+    logger.info(f"[flex-conference-status] conv_id={conv_id} event={status_event}")
+
+    task_sid = flex_task_sid_map.pop(conv_id, "") if conv_id else ""
+    if task_sid and FLEX_WORKSPACE_SID:
+        task_url = f"https://taskrouter.twilio.com/v1/Workspaces/{FLEX_WORKSPACE_SID}/Tasks/{task_sid}"
+        auth_headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
+
+        def _cancel_task() -> requests.Response:
+            return requests.post(task_url, data={
+                "AssignmentStatus": "canceled",
+                "Reason": "customer_hangup",
+            }, headers=auth_headers, timeout=10)
+
+        try:
+            loop = asyncio.get_event_loop()
+            res = await loop.run_in_executor(None, _cancel_task)
+            logger.info(f"[flex-conference-status] task cancel status={res.status_code} task_sid={task_sid}")
+        except Exception as e:
+            logger.error(f"[flex-conference-status] task cancel failed: {e}")
+
+    return {"success": True}
+
+
+@app.post("/flex-accept-reservation")
+async def flex_accept_reservation(request: Request) -> dict:
+    """Accept a TaskRouter reservation on behalf of the Flex agent (backend has real auth)."""
+    body = await request.json()
+    workspace_sid: str = body.get("workspaceSid", "")
+    task_sid: str = body.get("taskSid", "")
+    reservation_sid: str = body.get("reservationSid", "")
+    if not all([workspace_sid, task_sid, reservation_sid]):
+        return JSONResponse({"error": "workspaceSid, taskSid, reservationSid required"}, status_code=400)
+
+    url = f"https://taskrouter.twilio.com/v1/Workspaces/{workspace_sid}/Tasks/{task_sid}/Reservations/{reservation_sid}"
+    auth_headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
+
+    def _accept() -> requests.Response:
+        return requests.post(url, data={"ReservationStatus": "accepted"}, headers=auth_headers, timeout=10)
+
+    try:
+        loop = asyncio.get_event_loop()
+        res = await loop.run_in_executor(None, _accept)
+        logger.info(f"[flex-accept-reservation] status={res.status_code} reservation={reservation_sid}")
+        return {"success": res.status_code < 300}
+    except Exception as e:
+        logger.error(f"[flex-accept-reservation] error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/flex-handoff")
+async def flex_handoff(request: Request) -> dict:
+    """Bridge a browser WebRTC call and a Flex agent into a shared conference."""
+    body = await request.json()
+    call_sid: str = body.get("callSid", "")
+    worker_identity: str = body.get("workerIdentity", "")
+    if not call_sid or not worker_identity:
+        return JSONResponse({"error": "callSid and workerIdentity required"}, status_code=400)
+    if not twilio_client:
+        return JSONResponse({"error": "Twilio not configured"}, status_code=500)
+
+    # Pick the cfg phone number from any loaded app config
+    from_number = ""
+    for px, cfg in _APP_BACKENDS.items():
+        if hasattr(cfg, "phone_number") and cfg.phone_number:
+            from_number = cfg.phone_number
+            break
+
+    conference_name = f"Handoff_{call_sid}"
+    conf_twiml = f'<Response><Dial><Conference waitUrl="" beep="false">{conference_name}</Conference></Dial></Response>'
+
+    loop = asyncio.get_event_loop()
+
+    def _redirect_customer() -> None:
+        twilio_client.calls(call_sid).update(twiml=conf_twiml)
+
+    def _dial_agent() -> None:
+        twilio_client.calls.create(
+            to=f"client:{worker_identity}",
+            from_=from_number,
+            twiml=conf_twiml,
+        )
+
+    try:
+        await loop.run_in_executor(None, _redirect_customer)
+        logger.info(f"[flex-handoff] redirected customer call_sid={call_sid} to conference={conference_name}")
+        await loop.run_in_executor(None, _dial_agent)
+        logger.info(f"[flex-handoff] dialed agent worker={worker_identity}")
+        return {"success": True, "conferenceName": conference_name}
+    except Exception as e:
+        logger.error(f"[flex-handoff] error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,14 @@ async function start(): Promise<void> {
     reply.header('Access-Control-Allow-Headers', 'Content-Type');
   });
 
+  // Handle CORS preflight for all routes
+  fastify.options('*', async (_req, reply) => {
+    reply.header('Access-Control-Allow-Origin', '*');
+    reply.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PATCH,DELETE');
+    reply.header('Access-Control-Allow-Headers', 'Content-Type');
+    reply.status(204).send();
+  });
+
   const configs = loadAppConfigs();
   if (!configs.length) {
     console.error('[startup] no app configs found in src/apps/ — exiting');
@@ -38,6 +46,7 @@ async function start(): Promise<void> {
         root: cfg.clientDir,
         prefix: `${cfg.routePrefix}/`,
         decorateReply: false,
+        index: ['members.html'],
       });
     }
     const state = registerAppRoutes(fastify, cfg, TAC_PORT);

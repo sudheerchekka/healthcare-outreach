@@ -26,6 +26,7 @@ export interface AppRouteState {
   ciFlushTimers: Map<string, ReturnType<typeof setTimeout>>;
   transcriptMessages: Map<string, { role: string; text: string; ts: string }[]>;
   transcriptSseClients: Map<string, Set<import('http').ServerResponse>>;
+  chatSseClients: Map<string, Set<import('http').ServerResponse>>;
   formatTimestampPST: (dateStr?: string) => string;
   scheduleCIFlush: (profileId: string) => void;
   tacPort: number;
@@ -51,6 +52,7 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
   const ciSseClients    = new Map<string, Set<import('http').ServerResponse>>();
   const transcriptMessages    = new Map<string, { role: string; text: string; ts: string }[]>();
   const transcriptSseClients  = new Map<string, Set<import('http').ServerResponse>>();
+  const chatSseClients        = new Map<string, Set<import('http').ServerResponse>>();
 
   function formatTimestampPST(dateStr?: string): string {
     const date = dateStr ? new Date(dateStr) : new Date();
@@ -254,13 +256,16 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     try {
       const { AccessToken } = twilioJwt;
       const { VoiceGrant } = AccessToken;
+      const appSid = process.env.TWILIO_TWIML_APP_SID ?? '';
+      const grant = new VoiceGrant({ incomingAllow: true, outgoingApplicationSid: appSid || undefined });
       const token = new AccessToken(cfg.accountSid, cfg.apiKey, cfg.apiToken, { identity: 'care-team-agent', ttl: 3600 });
-      token.addGrant(new VoiceGrant({ incomingAllow: true }));
+      token.addGrant(grant);
       reply.send({ token: token.toJwt() });
     } catch (e) {
       reply.status(500).send({ error: String(e) });
     }
   });
+
 
   app.post(`${px}/api/browser-call`, async (req, reply) => {
     const { phone = '', profileId = '', name = '' } = req.body as Record<string, string>;
@@ -335,6 +340,34 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     }
   });
 
+  // ── Twilio Verify ─────────────────────────────────────────────────────────
+  app.post(`${px}/api/verify/send`, async (req, reply) => {
+    const { phone = '' } = req.body as Record<string, string>;
+    const memberPhone = normalizePhone(phone);
+    const to = cfg.smsSimulateMemberPhone || memberPhone;
+    if (!to) return reply.status(400).send({ success: false, error: 'phone required' });
+    if (!cfg.verifyServiceSid) return reply.status(500).send({ success: false, error: 'TWILIO_VERIFY_SERVICE_SID not configured' });
+    try {
+      await twilioClient!.verify.v2.services(cfg.verifyServiceSid).verifications.create({ to, channel: 'sms' });
+      reply.send({ success: true });
+    } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
+  });
+
+  app.post(`${px}/api/verify/check`, async (req, reply) => {
+    const { phone = '', code = '' } = req.body as Record<string, string>;
+    const to = cfg.smsSimulateMemberPhone || normalizePhone(phone);
+    if (!to || !code) return reply.status(400).send({ success: false, error: 'phone and code required' });
+    if (!cfg.verifyServiceSid) return reply.status(500).send({ success: false, error: 'TWILIO_VERIFY_SERVICE_SID not configured' });
+    try {
+      const check = await twilioClient!.verify.v2.services(cfg.verifyServiceSid).verificationChecks.create({ to, code });
+      reply.send({ success: true, status: check.status, valid: check.status === 'approved' });
+    } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
+  });
+
   // ── Admin: system prompts ─────────────────────────────────────────────────
   const SYSTEM_PROMPT_FILE         = path.join(process.cwd(), `src/apps/${cfg.id}/agent/src/system_prompt.txt`);
   const SYSTEM_PROMPT_INBOUND_FILE = path.join(process.cwd(), `src/tac/apps/${cfg.id}/system_prompt_inbound.txt`);
@@ -362,13 +395,196 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     reply.send({ success: true });
   });
 
+  // ── Chat channel (web widget) ─────────────────────────────────────────────
+  // POST /api/chat/start — create Twilio Conversation, add visitor participant, send first message
+  app.post(`${px}/api/chat/start`, async (req, reply) => {
+    const { phone = '', inquiry = '' } = req.body as Record<string, string>;
+    if (!phone || !inquiry) return reply.status(400).send({ error: 'phone and inquiry required' });
+    if (!twilioClient) return reply.status(500).send({ error: 'Twilio not configured' });
+
+    const chatServiceSid = process.env.TWILIO_CHAT_CONVERSATION_SERVICE_SID ?? '';
+    if (!chatServiceSid) return reply.status(500).send({ error: 'TWILIO_CHAT_CONVERSATION_SERVICE_SID not set' });
+
+    try {
+      console.log(`[${cfg.id}][chat] creating conversation phone=${phone} service=${chatServiceSid}`);
+      const conv = await twilioClient.conversations.v1
+        .services(chatServiceSid)
+        .conversations.create({ friendlyName: `webchat-${phone}-${Date.now()}` });
+      console.log(`[${cfg.id}][chat] conversation created sid=${conv.sid}`);
+
+      // Add visitor as a chat participant — identity = phone for cross-channel profile lookup
+      await (twilioClient.conversations.v1
+        .services(chatServiceSid)
+        .conversations(conv.sid)
+        .participants.create as (opts: Record<string, string>) => Promise<unknown>)(
+          { identity: phone, 'messagingBinding.type': 'chat' }
+        );
+      console.log(`[${cfg.id}][chat] participant added identity=${phone}`);
+
+      // Tell TAC which app owns this conversation
+      try {
+        const tacRes = await fetch(`http://localhost:${tacPort}/register-conversation`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ conversationSid: conv.sid, appId: cfg.id }),
+        });
+        console.log(`[${cfg.id}][chat] TAC register-conversation status=${tacRes.status}`);
+      } catch (e) {
+        console.warn(`[${cfg.id}][chat] TAC register-conversation failed (non-fatal): ${e}`);
+      }
+
+      reply.send({ conversationSid: conv.sid });
+    } catch (e) {
+      console.error(`[${cfg.id}][chat] start failed: ${e}`);
+      reply.status(500).send({ error: String(e) });
+    }
+  });
+
+  // POST /api/chat/message — visitor sends a message; forward directly to TAC for agent invocation
+  // (Twilio REST API messages don't trigger onMessageAdded webhooks, so we call TAC directly)
+  app.post(`${px}/api/chat/message`, async (req, reply) => {
+    const { conversationSid = '', body: msgBody = '', phone = '' } = req.body as Record<string, string>;
+    if (!conversationSid || !msgBody) return reply.status(400).send({ error: 'conversationSid and body required' });
+    console.log(`[${cfg.id}][chat] message conv=${conversationSid} phone=${phone} body="${msgBody.slice(0,80)}"`);
+    try {
+      const tacRes = await fetch(`http://localhost:${tacPort}/chat-message`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ conversationSid, body: msgBody, author: phone }),
+      });
+      const tacData = await tacRes.json() as { success: boolean; error?: string };
+      if (!tacData.success) throw new Error(tacData.error ?? 'TAC error');
+      reply.send({ success: true });
+    } catch (e) {
+      console.error(`[${cfg.id}][chat] message failed: ${e}`);
+      reply.status(500).send({ error: String(e) });
+    }
+  });
+
+  // GET /api/chat/:convSid/stream — SSE stream for agent replies to this conversation
+  app.get(`${px}/api/chat/:convSid/stream`, async (req, reply) => {
+    const { convSid } = req.params as { convSid: string };
+    reply.hijack();
+    const raw = reply.raw;
+    raw.setHeader('Content-Type', 'text/event-stream');
+    raw.setHeader('Cache-Control', 'no-cache');
+    raw.setHeader('Connection', 'keep-alive');
+    raw.setHeader('Access-Control-Allow-Origin', '*');
+    raw.flushHeaders();
+    if (!chatSseClients.has(convSid)) chatSseClients.set(convSid, new Set());
+    chatSseClients.get(convSid)!.add(raw);
+    console.log(`[${cfg.id}][chat] SSE client connected conv=${convSid} total=${chatSseClients.get(convSid)!.size}`);
+    const ping = setInterval(() => raw.write(': ping\n\n'), 25000);
+    req.raw.on('close', () => {
+      clearInterval(ping);
+      chatSseClients.get(convSid)?.delete(raw);
+      console.log(`[${cfg.id}][chat] SSE client disconnected conv=${convSid}`);
+    });
+  });
+
+  // POST /api/flex-dequeue-reservation — proxy TaskRouter dequeue from Flex plugin (CORS workaround)
+  app.post(`${px}/api/flex-dequeue-reservation`, async (req, reply) => {
+    const body = req.body as Record<string, string>;
+    try {
+      const res = await fetch(`http://localhost:${tacPort}/flex-dequeue-reservation`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      reply.status(res.status).send(data);
+    } catch (e) {
+      reply.status(500).send({ error: String(e) });
+    }
+  });
+
+  // POST /api/flex-handoff — bridge browser WebRTC call to Flex agent by redirecting both legs into a conference
+  app.post(`${px}/api/flex-handoff`, async (req, reply) => {
+    const { callSid = '', workerIdentity = '' } = req.body as Record<string, string>;
+    if (!callSid || !workerIdentity) {
+      return reply.status(400).send({ error: 'callSid and workerIdentity required' });
+    }
+    if (!twilioClient) return reply.status(500).send({ error: 'Twilio not configured' });
+
+    const conferenceName = `Handoff_${callSid}`;
+    const fromNumber = cfg.phoneNumber;
+
+    try {
+      // 1. Redirect the browser WebRTC call into a conference room
+      await twilioClient.calls(callSid).update({
+        twiml: `<Response><Dial><Conference waitUrl="" beep="false">${conferenceName}</Conference></Dial></Response>`,
+      });
+
+      // 2. Dial the Flex agent (via client: identity) into the same conference
+      await twilioClient.calls.create({
+        to: `client:${workerIdentity}`,
+        from: fromNumber,
+        twiml: `<Response><Dial><Conference waitUrl="" beep="false">${conferenceName}</Conference></Dial></Response>`,
+      });
+
+      reply.send({ success: true, conferenceName });
+    } catch (e) {
+      console.error(`[${cfg.id}] flex-handoff failed:`, e);
+      reply.status(500).send({ error: String(e) });
+    }
+  });
+
+  // POST /api/flex-cancel-task — cancel pending Flex task when browser call hangs up
+  app.post(`${px}/api/flex-cancel-task`, async (req, reply) => {
+    const { profileId = '' } = req.body as Record<string, string>;
+    try {
+      await fetch(`http://localhost:${tacPort}/flex-cancel-task`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ profileId }),
+      });
+    } catch { /* non-fatal */ }
+    reply.send({ success: true });
+  });
+
+  // POST /api/chat/close — close the CO conversation when widget is dismissed
+  app.post(`${px}/api/chat/close`, async (req, reply) => {
+    const { conversationSid = '' } = req.body as Record<string, string>;
+    if (conversationSid) {
+      try {
+        await fetch(`http://localhost:${tacPort}/chat-close`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ conversationSid }),
+        });
+      } catch { /* non-fatal */ }
+      chatSseClients.delete(conversationSid);
+    }
+    reply.send({ success: true });
+  });
+
+  // POST /chat-message-event — internal: TAC POSTs agent replies here for SSE fanout
+  app.post(`${px}/chat-message-event`, async (req, reply) => {
+    const raw = req.body as Record<string, unknown>;
+    const conversationSid = (raw.conversationSid as string) || '';
+    const msgBody = (raw.body as string) || '';
+    const author = (raw.author as string) || 'agent';
+    const showCallButton = raw.showCallButton ?? null;
+    const clients = chatSseClients.get(conversationSid);
+    console.log(`[${cfg.id}][chat] fanout conv=${conversationSid} clients=${clients?.size ?? 0} showCallButton=${!!showCallButton} body="${msgBody.slice(0,80)}"`);
+    if (clients?.size) {
+      const payload: Record<string, unknown> = { body: msgBody, author };
+      if (showCallButton) payload.showCallButton = showCallButton;
+      const event = `data: ${JSON.stringify(payload)}\n\n`;
+      clients.forEach(c => c.write(event));
+    } else {
+      console.warn(`[${cfg.id}][chat] no SSE clients listening for conv=${conversationSid} — browser may not be connected`);
+    }
+    reply.send({ success: true });
+  });
+
   // ── CI webhook (shared — registered in index.ts at /ci-webhook) ──────────
   // Handler body is below but registered as a shared route via the returned state.
   // ── END per-app routes ────────────────────────────────────────────────────
 
   return {
     cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, ciFlushTimers,
-    transcriptMessages, transcriptSseClients, formatTimestampPST, scheduleCIFlush, tacPort,
+    transcriptMessages, transcriptSseClients, chatSseClients, formatTimestampPST, scheduleCIFlush, tacPort,
   };
 }
 
@@ -397,6 +613,9 @@ export async function handleCiWebhook(
   let summaryText = '';
   let outreachAnalysis = '';
 
+  console.log(`[CI] FULL PAYLOAD: ${JSON.stringify(payload).slice(0, 3000)}`);
+  console.log(`[CI] webhook profileId=${profileId ?? '(pending)'} operatorResults=${operatorResults.length} convId=${convId}`);
+
   for (const raw of operatorResults) {
     const result = raw as Record<string, unknown>;
     const operator = result.operator as Record<string, unknown> | undefined;
@@ -410,9 +629,11 @@ export async function handleCiWebhook(
     }
 
     const outputFormat = (result.outputFormat as string | undefined) ?? '';
-    const resultField  = result.result as Record<string, unknown> | undefined;
+    const resultRaw    = result.result;
+    const resultField  = (resultRaw !== null && typeof resultRaw === 'object') ? resultRaw as Record<string, unknown> : undefined;
     const isOutreachOp = cfg.ciOutreachOperatorSid && operatorId === cfg.ciOutreachOperatorSid;
     const isSummaryOp  = !isOutreachOp && (cfg.ciSummaryOperatorSid ? operatorId === cfg.ciSummaryOperatorSid : true);
+    console.log(`[CI] operator id=${operatorId} outputFormat=${outputFormat} isOutreachOp=${!!isOutreachOp} isSummaryOp=${isSummaryOp} ciSummaryOpSid=${cfg.ciSummaryOperatorSid} result=${JSON.stringify(resultRaw).slice(0, 300)}`);
 
     const liveOp = cfg.ciOperators.find(o => o.sid === operatorId);
     if (liveOp && profileId && resultField) {
@@ -442,7 +663,7 @@ export async function handleCiWebhook(
     }
 
     if (isSummaryOp && !summaryText) {
-      if (outputFormat === 'TEXT') summaryText = (resultField?.result as string) ?? '';
+      if (outputFormat === 'TEXT') summaryText = (typeof resultRaw === 'string' ? resultRaw : (resultField?.result as string) ?? (resultField?.text as string)) ?? '';
       if (!summaryText) {
         const p = resultField?.payload
           ?? (resultField?.['com.twilio.cai.intelligence.JSONResult'] as Record<string,unknown> | undefined)?.payload;
@@ -454,7 +675,7 @@ export async function handleCiWebhook(
           summaryText = (po.summary as string) ?? (po.text as string) ?? ((po.summaries as { summary: string }[])?.[0]?.summary) ?? '';
         }
       }
-      if (!summaryText) summaryText = (resultField?.result as string) ?? (resultField?.summary as string) ?? '';
+      if (!summaryText) summaryText = (typeof resultRaw === 'string' ? resultRaw : '') || (resultField?.result as string) ?? (resultField?.summary as string) ?? (resultField?.text as string) ?? '';
     }
 
     if (isOutreachOp && !outreachAnalysis) {
@@ -471,6 +692,7 @@ export async function handleCiWebhook(
     }
   }
 
+  console.log(`[CI] extracted summaryText=${summaryText.slice(0,200) || '(empty)'} outreachAnalysis=${outreachAnalysis ? '(set)' : '(empty)'} profileId=${profileId ?? '(none)'}`);
   if (!profileId || (!summaryText && !outreachAnalysis)) return;
 
   const execDetails = (operatorResults[0] as Record<string,unknown> | undefined)?.executionDetails as Record<string,unknown> | undefined;

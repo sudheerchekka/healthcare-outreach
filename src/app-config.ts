@@ -23,6 +23,8 @@ export interface AppConfig {
   ciOutreachOperatorSid: string;
   smsWriteObservation: boolean;
   ciOperators: CiOperatorConfig[];
+  verifyServiceSid: string;
+  smsSimulateMemberPhone: string;
   clientDir: string;          // absolute path to the client/ directory
 }
 
@@ -42,6 +44,8 @@ interface RawAppJson {
   ci_summary_operator_env: string;
   ci_outreach_operator_env: string;
   sms_write_observation_env: string;
+  verify_service_sid_env: string;
+  sms_simulate_member_phone_env: string;
   ci_operators: { sid_env: string; label_env: string; default_label: string }[];
 }
 
@@ -76,6 +80,8 @@ export function loadAppConfigs(): AppConfig[] {
         ciSummaryOperatorSid: ev(raw.ci_summary_operator_env),
         ciOutreachOperatorSid: ev(raw.ci_outreach_operator_env),
         smsWriteObservation: ev(raw.sms_write_observation_env, 'false').toLowerCase() === 'true',
+        verifyServiceSid: ev(raw.verify_service_sid_env ?? ''),
+        smsSimulateMemberPhone: ev(raw.sms_simulate_member_phone_env ?? ''),
         ciOperators,
         clientDir: path.join(appsDir, appId, 'client'),
       });
