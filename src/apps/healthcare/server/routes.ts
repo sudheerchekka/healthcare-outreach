@@ -565,11 +565,13 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     const msgBody = (raw.body as string) || '';
     const author = (raw.author as string) || 'agent';
     const showCallButton = raw.showCallButton ?? null;
+    const handoffToFlex  = raw.handoffToFlex  ?? null;
     const clients = chatSseClients.get(conversationSid);
-    console.log(`[${cfg.id}][chat] fanout conv=${conversationSid} clients=${clients?.size ?? 0} showCallButton=${!!showCallButton} body="${msgBody.slice(0,80)}"`);
+    console.log(`[${cfg.id}][chat] fanout conv=${conversationSid} clients=${clients?.size ?? 0} showCallButton=${!!showCallButton} handoffToFlex=${!!handoffToFlex} body="${msgBody.slice(0,80)}"`);
     if (clients?.size) {
       const payload: Record<string, unknown> = { body: msgBody, author };
       if (showCallButton) payload.showCallButton = showCallButton;
+      if (handoffToFlex)  payload.handoffToFlex  = handoffToFlex;
       const event = `data: ${JSON.stringify(payload)}\n\n`;
       clients.forEach(c => c.write(event));
     } else {
@@ -613,7 +615,8 @@ export async function handleCiWebhook(
   let summaryText = '';
   let outreachAnalysis = '';
 
-  console.log(`[CI] FULL PAYLOAD: ${JSON.stringify(payload).slice(0, 3000)}`);
+  const ciVerbose = process.env.CI_VERBOSE_LOGS === 'true';
+  if (ciVerbose) console.log(`[CI] FULL PAYLOAD: ${JSON.stringify(payload).slice(0, 3000)}`);
   console.log(`[CI] webhook profileId=${profileId ?? '(pending)'} operatorResults=${operatorResults.length} convId=${convId}`);
 
   for (const raw of operatorResults) {
@@ -633,7 +636,7 @@ export async function handleCiWebhook(
     const resultField  = (resultRaw !== null && typeof resultRaw === 'object') ? resultRaw as Record<string, unknown> : undefined;
     const isOutreachOp = cfg.ciOutreachOperatorSid && operatorId === cfg.ciOutreachOperatorSid;
     const isSummaryOp  = !isOutreachOp && (cfg.ciSummaryOperatorSid ? operatorId === cfg.ciSummaryOperatorSid : true);
-    console.log(`[CI] operator id=${operatorId} outputFormat=${outputFormat} isOutreachOp=${!!isOutreachOp} isSummaryOp=${isSummaryOp} ciSummaryOpSid=${cfg.ciSummaryOperatorSid} result=${JSON.stringify(resultRaw).slice(0, 300)}`);
+    if (ciVerbose) console.log(`[CI] operator id=${operatorId} outputFormat=${outputFormat} isOutreachOp=${!!isOutreachOp} isSummaryOp=${isSummaryOp} ciSummaryOpSid=${cfg.ciSummaryOperatorSid} result=${JSON.stringify(resultRaw).slice(0, 300)}`);
 
     const liveOp = cfg.ciOperators.find(o => o.sid === operatorId);
     if (liveOp && profileId && resultField) {

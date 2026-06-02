@@ -107,3 +107,4 @@ export default class HealthcareFlexPlugin extends FlexPlugin {
 
   }
 }
+

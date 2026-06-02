@@ -133,6 +133,7 @@
   }
   .msg { max-width: 82%; padding: 10px 13px; border-radius: 12px; font-size: 14px; line-height: 1.5; word-break: break-word; }
   .msg.agent { background: var(--bg); color: var(--text); border-bottom-left-radius: 3px; align-self: flex-start; }
+  .msg.human-agent { background: #e8f4e8; color: var(--text); border-bottom-left-radius: 3px; align-self: flex-start; border-left: 3px solid #4caf50; }
   .msg.visitor { background: var(--brand); color: var(--white); border-bottom-right-radius: 3px; align-self: flex-end; }
   .msg.typing { background: var(--bg); align-self: flex-start; }
   .typing-dots { display: flex; gap: 4px; padding: 2px 0; }
@@ -438,9 +439,12 @@
         const msg = JSON.parse(e.data);
         removeTyping();
         if (msg.body) {
-          addMessage(msg.body, 'agent');
+          // Human Flex agent messages have a non-generic author; render as 'human-agent'
+          const role = (msg.author && msg.author !== 'agent') ? 'human-agent' : 'agent';
+          addMessage(msg.body, role);
         }
         if (msg.showCallButton) showCallButton(msg.showCallButton);
+        if (msg.handoffToFlex)  showFlexHandoff(msg.handoffToFlex);
       } catch { /* ignore ping/keep-alive */ }
     };
     eventSource.onerror = (e) => console.warn('[chat] SSE error/reconnect', e);
@@ -492,6 +496,14 @@
     callBtn.textContent = '📞 Call Me';
     callBtn.classList.remove('active');
     callBtn.disabled = false;
+  }
+
+  function showFlexHandoff(data) {
+    callLabel.textContent = '💬 Connected to a care specialist';
+    callBar.style.display = 'flex';
+    callBtn.style.display = 'none';
+    muteBtn.style.display = 'none';
+    addMessage('I\'m connecting you with a care specialist. They\'ll continue this conversation shortly.', 'agent');
   }
 
   callBtn.addEventListener('click', async () => {

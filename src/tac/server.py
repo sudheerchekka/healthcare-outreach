@@ -247,8 +247,11 @@ class AgentCoreBackend:
         }))
         async for raw in ws:
             data = json.loads(raw)
+            msg_t = data.get("type") if isinstance(data, dict) else type(data).__name__
+            if msg_t != "text":
+                logger.info(f"[{self._cfg.id}][agentcore-ws] non-text msg type={msg_t} data={str(data)[:200]}")
             yield data
-            if data.get("type") == "text" and data.get("last"):
+            if isinstance(data, dict) and data.get("type") == "text" and data.get("last"):
                 break
 
     async def interrupt(self, session_id: str, utterance: str) -> None:
@@ -387,6 +390,7 @@ profile_app_map: dict[str, str] = {}
 # Chat channel: Classic Conversations SID (CH...) ↔ CO conversation ID
 chat_classic_to_co: dict[str, str] = {}
 chat_co_to_classic: dict[str, str] = {}
+chat_escalated_convs: set[str] = set()   # conv_sids handed off to Flex — reject further messages
 
 # Tracks CO conv_ids that originated from browser/WebRTC calls (device.connect)
 # Used to pick the right Flex escalation path (Enqueue vs Application TwiML)
@@ -460,6 +464,97 @@ def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_q
         "</Dial>"
         "</Response>"
     )
+
+
+async def _escalate_chat_to_flex(
+    conv_sid: str, co_conv_id: str, reason: str, urgency: str,
+    cfg: "AppConfig", visitor_phone: str, profile_id: str,
+) -> bool:
+    """Create a TaskRouter chat task so a Flex agent can pick up the Conversations thread."""
+    logger.info(f"[{cfg.id}][chat-escalation] attempt conv_sid={conv_sid} reason={reason} enabled={ESCALATION_ENABLED}")
+    if not ESCALATION_ENABLED:
+        logger.warning(f"[{cfg.id}][chat-escalation] ESCALATION_ENABLED=false — set to true in .env and restart")
+        return False
+    if not FLEX_WORKSPACE_SID or not FLEX_WORKFLOW_SID:
+        logger.error(f"[{cfg.id}][chat-escalation] missing FLEX_WORKSPACE_SID or FLEX_WORKFLOW_SID")
+        return False
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        logger.error(f"[{cfg.id}][chat-escalation] missing Twilio credentials")
+        return False
+
+    map_entry = outbound_conversation_map.get(co_conv_id) or {}
+    member_name       = map_entry.get("name", "")             if isinstance(map_entry, dict) else ""
+    member_phone      = map_entry.get("phone", visitor_phone) if isinstance(map_entry, dict) else visitor_phone
+    member_profile_id = map_entry.get("profileId", profile_id) if isinstance(map_entry, dict) else profile_id
+
+    flex_flow_sid        = os.environ.get("FLEX_CHAT_FLOW_SID", "")
+    chat_service_sid_env = os.environ.get("TWILIO_CHAT_CONVERSATION_SERVICE_SID", "")
+    task_attrs = {
+        # Flex reserved fields for display name and channel rendering
+        "customer_name": member_name or member_phone,
+        "customerName":  member_name or member_phone,
+        "name":          member_name or member_phone,
+        "from":          member_phone,
+        # Channel fields Flex needs to render the conversation thread in the task panel
+        "channelType":        "web",
+        "conversationSid":    conv_sid,
+        "conversationServiceSid": chat_service_sid_env,
+        # Custom fields
+        "taskType":        "chat",
+        "customerAddress": member_phone,
+        "memberProfileId": member_profile_id,
+        "reason":          reason,
+        "urgency":         urgency,
+        "direction":       "inbound",
+    }
+    if flex_flow_sid:
+        task_attrs["flexFlowSid"] = flex_flow_sid
+    logger.info(f"[{cfg.id}][chat-escalation] task_attrs={task_attrs}")
+
+    task_url = f"https://taskrouter.twilio.com/v1/Workspaces/{FLEX_WORKSPACE_SID}/Tasks"
+    auth_headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
+
+    def _create_task() -> requests.Response:
+        return requests.post(task_url, data={
+            "WorkflowSid": FLEX_WORKFLOW_SID,
+            "TaskChannel": "chat",
+            "Attributes": json.dumps(task_attrs),
+        }, headers=auth_headers, timeout=10)
+
+    try:
+        res = await asyncio.get_event_loop().run_in_executor(None, _create_task)
+        logger.info(f"[{cfg.id}][chat-escalation] TaskRouter response status={res.status_code} body={res.text[:400]}")
+        if res.status_code < 300:
+            task_data = res.json()
+            task_sid = task_data.get("sid", "")
+            flex_task_sid_map[co_conv_id] = task_sid
+            if member_profile_id:
+                flex_task_profile_map[member_profile_id] = task_sid
+            logger.info(f"[{cfg.id}][chat-escalation] task created task_sid={task_sid} name={member_name!r} profileId={member_profile_id}")
+
+            # Add Flex agent as a Conversations participant so they can send messages
+            flex_agent_identity = os.environ.get("FLEX_AGENT_IDENTITY", "")
+            chat_service_sid = os.environ.get("TWILIO_CHAT_CONVERSATION_SERVICE_SID", "")
+            if flex_agent_identity and twilio_client and chat_service_sid:
+                def _add_agent_participant() -> None:
+                    try:
+                        twilio_client.conversations.v1 \
+                            .services(chat_service_sid) \
+                            .conversations(conv_sid) \
+                            .participants.create(identity=flex_agent_identity)
+                        logger.info(f"[{cfg.id}][chat-escalation] added flex agent participant identity={flex_agent_identity!r}")
+                    except Exception as e:
+                        logger.warning(f"[{cfg.id}][chat-escalation] add participant failed (may already exist): {e}")
+                await asyncio.get_event_loop().run_in_executor(None, _add_agent_participant)
+            else:
+                logger.warning(f"[{cfg.id}][chat-escalation] FLEX_AGENT_IDENTITY not set — Flex agent won't be able to type")
+
+            return True
+        logger.error(f"[{cfg.id}][chat-escalation] task creation failed status={res.status_code}")
+        return False
+    except Exception as e:
+        logger.error(f"[{cfg.id}][chat-escalation] exception: {e}", exc_info=True)
+        return False
 
 
 async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target_queue: str) -> bool:
@@ -779,11 +874,12 @@ def _build_memory_context(memory: Optional[TACMemoryResponse], traits: Optional[
 async def _invoke_agent(session_id: str, prompt: str, system_prompt: str, context: str,
                         cfg: "AppConfig", member_phone: str = "", profile_id: str = "",
                         member_traits: Optional[dict] = None,
-                        on_schedule_call=None) -> str:
+                        on_schedule_call=None,
+                        on_escalate=None) -> str:
     """Invoke the app's agent backend and return the full reply text.
 
-    on_schedule_call: optional async callable(phone, reason) injected by chat channel
-    so it can show a call button in the widget instead of auto-dialing.
+    on_schedule_call: optional async callable(phone, reason) — chat channel shows call button
+    on_escalate: optional async callable(reason, urgency) — chat channel routes to Flex
     """
     backend = _APP_BACKENDS[cfg.route_prefix]
     tokens: list[str] = []
@@ -796,7 +892,11 @@ async def _invoke_agent(session_id: str, prompt: str, system_prompt: str, contex
         profile_id=profile_id,
         member_traits=member_traits,
     ):
+        if not isinstance(data, dict):
+            logger.warning(f"[agent] unexpected non-dict from backend: {str(data)[:200]}")
+            continue
         msg_type = data.get("type")
+        logger.debug(f"[agent] msg type={msg_type}")
         if msg_type == "text":
             token = data.get("token", "")
             if token:
@@ -811,6 +911,12 @@ async def _invoke_agent(session_id: str, prompt: str, system_prompt: str, contex
                 await on_schedule_call(sc_phone, sc_reason)
             else:
                 asyncio.create_task(_trigger_outbound_call_by_profile(profile_id, sc_phone, sc_reason, cfg=cfg, traits=member_traits or {}))
+        elif msg_type == "escalate":
+            esc_reason = str(data.get("reason", "member_requested_human"))
+            esc_urgency = str(data.get("urgency", "normal"))
+            logger.info(f"[{cfg.id}][escalate] agent requested escalation reason={esc_reason} urgency={esc_urgency}")
+            if on_escalate:
+                await on_escalate(esc_reason, esc_urgency)
         elif msg_type == "tool_start":
             logger.info(f"[agent] tool_start tool={data.get('tool')}")
         elif msg_type == "tool_result":
@@ -1484,10 +1590,7 @@ async def conversations_webhook(request: Request) -> dict:
 
     logger.info(f"[chat] webhook event={event_type} conv_sid={conv_sid} author={author} body=\"{body_text[:80]}\"")
 
-    # Only process new inbound messages; skip agent echo
     if event_type != "onMessageAdded":
-        return {"success": True}
-    if author in ("agent", "") or author.startswith("agent_"):
         return {"success": True}
     if not body_text:
         return {"success": True}
@@ -1501,6 +1604,27 @@ async def conversations_webhook(request: Request) -> dict:
     if not cfg:
         logger.error("[chat] no app config available")
         return {"success": False}
+
+    # Conversation handed off to Flex — fan out human agent messages to browser, suppress AI
+    if conv_sid in chat_escalated_convs:
+        ai_authors = {"agent", "", "visitor"}
+        if author in ai_authors or author.startswith("agent_"):
+            return {"success": True}  # skip AI echo
+        logger.info(f"[{cfg.id}][chat] escalated — fanning out human agent msg author={author!r} body=\"{body_text[:80]}\"")
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"http://localhost:{APP_PORT}{cfg.route_prefix}/chat-message-event",
+                    json={"conversationSid": conv_sid, "body": body_text, "author": author},
+                    timeout=5,
+                )
+        except Exception as e:
+            logger.warning(f"[{cfg.id}][chat] SSE fanout for human agent message failed: {e}")
+        return {"success": True}
+
+    # Skip AI agent's own echo before invoking AI
+    if author in ("agent", "") or author.startswith("agent_"):
+        return {"success": True}
 
     visitor_phone = author  # identity was set to phone number at participant creation
 
@@ -1609,6 +1733,21 @@ async def chat_message(request: Request) -> dict:
     if not conv_sid or not body_text:
         return {"success": False, "error": "conversationSid and body required"}
 
+    if conv_sid in chat_escalated_convs:
+        # Conversation is with a human Flex agent — write visitor message to Conversations and return.
+        # The Flex agent sees it in their UI; the conversations-webhook fans it out if needed.
+        logger.info(f"[chat] escalated conv — writing visitor message directly conv_sid={conv_sid} author={author}")
+        chat_service_sid = os.environ.get("TWILIO_CHAT_CONVERSATION_SERVICE_SID", "")
+        if twilio_client and chat_service_sid:
+            try:
+                twilio_client.conversations.v1 \
+                    .services(chat_service_sid) \
+                    .conversations(conv_sid) \
+                    .messages.create(author=author or "visitor", body=body_text)
+            except Exception as e:
+                logger.warning(f"[chat] write visitor message to escalated conv failed: {e}")
+        return {"success": True}
+
     # Resolve app config
     prefix = _CONV_SID_TO_APP.get(conv_sid)
     cfg = ALL_APPS.get(prefix) if prefix else None
@@ -1634,10 +1773,15 @@ async def chat_message(request: Request) -> dict:
 
     # Look up profile
     loop = asyncio.get_event_loop()
+    logger.info(f"[{cfg.id}][chat] looking up profile for phone={visitor_phone}")
     profile_id = await loop.run_in_executor(None, _lookup_profile_id, visitor_phone, cfg) if visitor_phone else None
-    if not profile_id:
+    if profile_id:
+        logger.info(f"[{cfg.id}][chat] profile matched phone={visitor_phone} profileId={profile_id}")
+    else:
         profile_id = conv_sid
-        logger.warning(f"[{cfg.id}][chat] no profile for phone={visitor_phone} — using conv_sid")
+        logger.warning(f"[{cfg.id}][chat] no profile matched phone={visitor_phone} — falling back to conv_sid as session key")
+
+    traits: dict = {}  # populated after memory fetch below; initialised here for CO creation reference
 
     # Bridge into CO (create on first message, reuse on subsequent)
     co_conv_id = chat_classic_to_co.get(conv_sid)
@@ -1662,8 +1806,12 @@ async def chat_message(request: Request) -> dict:
                 participant_type="AI_AGENT",
             )
             conv_app_map[co_conv_id] = cfg.route_prefix
-            outbound_conversation_map[co_conv_id] = {"phone": visitor_phone, "profileId": profile_id, "name": ""}
-            logger.info(f"[{cfg.id}][chat] CO conversation created co_conv_id={co_conv_id}")
+            member_name_for_map = (
+                f"{traits.get('firstName', '')} {traits.get('lastName', '')}".strip()
+                or traits.get("name", "")
+            ) if traits else ""
+            outbound_conversation_map[co_conv_id] = {"phone": visitor_phone, "profileId": profile_id, "name": member_name_for_map}
+            logger.info(f"[{cfg.id}][chat] CO conversation created co_conv_id={co_conv_id} name={member_name_for_map!r}")
         except Exception as e:
             logger.error(f"[{cfg.id}][chat] CO creation failed: {e}", exc_info=True)
             co_conv_id = conv_sid  # fall back to classic SID
@@ -1676,7 +1824,28 @@ async def chat_message(request: Request) -> dict:
     prewarm_task = asyncio.create_task(backend.prewarm(co_conv_id))
     (memory, traits), _ = await asyncio.gather(memory_task, prewarm_task)
 
+    # Update outbound_conversation_map with name now that traits are resolved
+    if co_conv_id in outbound_conversation_map and traits:
+        entry = outbound_conversation_map[co_conv_id]
+        if isinstance(entry, dict) and not entry.get("name"):
+            resolved_name = (
+                f"{traits.get('firstName', '')} {traits.get('lastName', '')}".strip()
+                or traits.get("name", "")
+            )
+            if resolved_name:
+                entry["name"] = resolved_name
+                logger.info(f"[{cfg.id}][chat] updated member name in map name={resolved_name!r}")
+
+    obs_count  = len(memory.observations) if memory else 0
+    sum_count  = len(memory.summaries)    if memory else 0
+    trait_keys = list(traits.keys()) if traits else []
+    logger.info(f"[{cfg.id}][chat] memory loaded profileId={profile_id} observations={obs_count} summaries={sum_count} trait_keys={trait_keys}")
+
     context       = _build_memory_context(memory, traits)
+    if context:
+        logger.info(f"[{cfg.id}][chat] injecting memory context into AgentCore ({len(context)} chars)")
+    else:
+        logger.warning(f"[{cfg.id}][chat] memory context is EMPTY — AgentCore will have no member history")
     system_prompt = _build_chat_system_prompt(cfg)
 
     # on_schedule_call: push a show_call_button event to the browser instead of auto-dialing
@@ -1687,6 +1856,15 @@ async def chat_message(request: Request) -> dict:
         call_button_signal["reason"] = reason
         call_button_signal["profileId"] = profile_id
         logger.info(f"[{cfg.id}][chat] schedule_call signal — will show call button phone={phone}")
+
+    # on_escalate: create a Flex chat task and signal the browser to show handoff UI
+    escalation_signal: dict = {}
+
+    async def _on_escalate(reason: str, urgency: str) -> None:
+        escalation_signal["triggered"] = True
+        escalation_signal["reason"] = reason
+        escalation_signal["urgency"] = urgency
+        logger.info(f"[{cfg.id}][chat] escalation signal captured reason={reason} urgency={urgency}")
 
     try:
         reply_text = await _invoke_agent(
@@ -1699,6 +1877,7 @@ async def chat_message(request: Request) -> dict:
             profile_id=profile_id,
             member_traits=traits,
             on_schedule_call=_on_schedule_call,
+            on_escalate=_on_escalate,
         )
     except Exception as e:
         logger.error(f"[{cfg.id}][chat] agent invocation failed: {e}", exc_info=True)
@@ -1717,12 +1896,33 @@ async def chat_message(request: Request) -> dict:
         except Exception as e:
             logger.error(f"[{cfg.id}][chat] write agent reply failed: {e}")
 
-    # Push reply + optional call button signal to browser via Node.js SSE fanout
+    # Handle Flex chat escalation if agent signalled it
+    handoff_to_flex: dict = {}
+    if escalation_signal.get("triggered"):
+        esc_reason  = escalation_signal.get("reason", "member_requested_human")
+        esc_urgency = escalation_signal.get("urgency", "normal")
+        escalated = await _escalate_chat_to_flex(
+            conv_sid=conv_sid,
+            co_conv_id=co_conv_id,
+            reason=esc_reason,
+            urgency=esc_urgency,
+            cfg=cfg,
+            visitor_phone=visitor_phone,
+            profile_id=profile_id,
+        )
+        if escalated:
+            chat_escalated_convs.add(conv_sid)
+            handoff_to_flex = {"reason": esc_reason}
+            logger.info(f"[{cfg.id}][chat] conv_sid={conv_sid} added to chat_escalated_convs")
+
+    # Push reply + optional signals to browser via Node.js SSE fanout
     try:
         async with httpx.AsyncClient() as client:
             payload: dict = {"conversationSid": conv_sid, "body": reply_text, "author": "agent"}
             if call_button_signal:
                 payload["showCallButton"] = call_button_signal
+            if handoff_to_flex:
+                payload["handoffToFlex"] = handoff_to_flex
             await client.post(
                 f"http://localhost:{APP_PORT}{cfg.route_prefix}/chat-message-event",
                 json=payload,
@@ -1759,12 +1959,11 @@ async def health() -> dict:
 
 @app.post("/flex-assignment-callback")
 async def flex_assignment_callback(request: Request) -> Response:
-    """TaskRouter assignment callback for browser-call Flex tasks.
-    Returns a dequeue instruction with an explicit 'from' so Flex can
-    dial the worker into the conference without needing caller_id in worker attributes."""
+    """TaskRouter assignment callback. Handles both voice (dequeue) and chat tasks."""
     form = dict(await request.form())
     task_attrs_raw = form.get("TaskAttributes", "{}")
     worker_attrs_raw = form.get("WorkerAttributes", "{}")
+    worker_sid = form.get("WorkerSid", "")
     try:
         import json as _json
         task_attrs = _json.loads(task_attrs_raw)
@@ -1773,13 +1972,34 @@ async def flex_assignment_callback(request: Request) -> Response:
         task_attrs = {}
         worker_attrs = {}
 
+    task_type = task_attrs.get("taskType", "voice")
+    logger.info(f"[flex-assignment] taskType={task_type} worker_sid={worker_sid} task_attrs={task_attrs}")
+
+    # Chat task: add the Flex agent as a Conversations participant so they can send messages
+    if task_type == "chat":
+        conv_sid = task_attrs.get("conversationSid", "")
+        worker_identity = worker_attrs.get("full_name", "") or worker_attrs.get("email", "") or worker_sid
+        chat_service_sid = os.environ.get("TWILIO_CHAT_CONVERSATION_SERVICE_SID", "")
+        logger.info(f"[flex-assignment][chat] conv_sid={conv_sid} worker_identity={worker_identity!r}")
+        if twilio_client and conv_sid and worker_identity and chat_service_sid:
+            try:
+                twilio_client.conversations.v1 \
+                    .services(chat_service_sid) \
+                    .conversations(conv_sid) \
+                    .participants.create(identity=worker_identity)
+                logger.info(f"[flex-assignment][chat] added worker {worker_identity!r} as participant to conv {conv_sid}")
+            except Exception as e:
+                logger.warning(f"[flex-assignment][chat] add participant failed (may already exist): {e}")
+        return Response(content=_json.dumps({"instruction": "accept"}), media_type="application/json")
+
+    # Voice task: dequeue into conference
     called = task_attrs.get("called", "")
     contact_uri = worker_attrs.get("contact_uri", "")
-    logger.info(f"[flex-assignment] called={called!r} contact_uri={contact_uri!r} task_attrs={task_attrs}")
+    logger.info(f"[flex-assignment][voice] called={called!r} contact_uri={contact_uri!r}")
 
     instruction = {
         "instruction": "dequeue",
-        "from": called,          # Twilio number (called = cfg_phone)
+        "from": called,
         "post_work_activity_sid": "",
     }
     if contact_uri:

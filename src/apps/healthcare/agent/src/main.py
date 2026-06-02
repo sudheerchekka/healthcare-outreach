@@ -217,6 +217,14 @@ async def invoke(payload, context):
 
     log.info(f"[STM] stream complete — full_reply length={len(full_reply)} MEMORY_ID={bool(MEMORY_ID)} mem_manager={bool(mem_manager)}")
 
+    # Emit escalation signal if the agent called escalate_to_human() during this turn
+    if escalation_state.get("triggered"):
+        esc_reason  = escalation_state.pop("reason", "member_requested_human")
+        esc_urgency = escalation_state.pop("urgency", "normal")
+        escalation_state.clear()
+        log.info(f"[escalation] invoke() emitting escalate signal reason={esc_reason} urgency={esc_urgency}")
+        yield {"type": "escalate", "reason": esc_reason, "urgency": esc_urgency}
+
     # Persist this turn to short-term memory
     if MEMORY_ID and mem_manager and full_reply:
         try:
