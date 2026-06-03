@@ -1,0 +1,91 @@
+{
+  "initial_state": "Trigger",
+  "flags": {
+    "allow_concurrent_calls": true
+  },
+  "description": "A New Flow",
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        {
+          "event": "incomingMessage"
+        },
+        {
+          "next": "search_for_profile_2",
+          "event": "incomingCall"
+        },
+        {
+          "event": "incomingConversationMessage"
+        },
+        {
+          "event": "incomingRequest"
+        },
+        {
+          "event": "incomingParent"
+        }
+      ],
+      "properties": {
+        "offset": {
+          "x": 0,
+          "y": 0
+        }
+      }
+    },
+    {
+      "name": "send_to_flex_1",
+      "type": "send-to-flex",
+      "transitions": [
+        {
+          "event": "callComplete"
+        },
+        {
+          "event": "failedToEnqueue"
+        },
+        {
+          "event": "callFailure"
+        }
+      ],
+      "properties": {
+        "offset": {
+          "x": 280,
+          "y": 490
+        },
+        "workflow": "WWd36c06d5e57ac18655635f886af62f1f",
+        "channel": "TCdc6c5061527eb23d6c00b18b6181acec",
+        "attributes": "{\n  \"taskType\": \"voice\",\n  \"name\": \"{{trigger.call.Param_memberName}}\",\n  \"customerAddress\": \"{{trigger.call.Param_memberPhone}}\",\n  \"memberProfileId\": \"{{trigger.call.Param_memberProfileId}}\",\n  \"reason\": \"{{trigger.call.Param_reason}}\",\n  \"direction\": \"{{trigger.call.Param_direction}}\",\n  \"called\": \"{{trigger.call.To}}\",\n  \"from\": \"{{trigger.call.From}}\"\n}",
+        "priority": "0",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "search_for_profile_2",
+      "type": "look-up-profile",
+      "transitions": [
+        {
+          "next": "send_to_flex_1",
+          "event": "profileFound"
+        },
+        {
+          "event": "noProfileFound"
+        },
+        {
+          "event": "failed"
+        }
+      ],
+      "properties": {
+        "identifier": "phone",
+        "contact_identifier_value": "{{trigger.call.Param_memberPhone}}",
+        "offset": {
+          "x": 772,
+          "y": 242
+        },
+        "profile_connector_instance": {
+          "friendly_name": "HLS dotorg",
+          "sid": "PD408dd69aee1d13425eee7b7312bb35e1"
+        }
+      }
+    }
+  ]
+}
