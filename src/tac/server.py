@@ -415,7 +415,7 @@ def _twilio_basic_auth_header() -> dict[str, str]:
 def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_queue: str,
                                member_phone: str = "", member_name: str = "", member_profile_id: str = "",
                                is_browser_call: bool = False, cfg_phone: str = "",
-                               browser_caller_id: str = "") -> str:
+                               browser_caller_id: str = "", direction: str = "inbound") -> str:
     if is_browser_call and FLEX_WORKFLOW_SID:
         import json as _json
         # Browser/WebRTC: Studio always reads From from the live call (= "client:care-team-agent"),
@@ -432,7 +432,7 @@ def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_q
             "name": member_name or "",
             "memberProfileId": member_profile_id or "",
             "reason": reason,
-            "direction": "inbound",
+            "direction": direction,
         }
         attrs_json = _json.dumps(task_attrs).replace('"', '&quot;')
         return (
@@ -451,6 +451,7 @@ def _build_flex_transfer_twiml(conv_id: str, reason: str, urgency: str, target_q
         params += f'<Parameter name="memberName" value="{escape(member_name)}" />'
     if member_profile_id:
         params += f'<Parameter name="memberProfileId" value="{escape(member_profile_id)}" />'
+    params += f'<Parameter name="direction" value="{escape(direction)}" />'
     if urgency == "high":
         params += '<Parameter name="urgency" value="high" />'
     return (
@@ -682,8 +683,9 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
                 "name": member_name or "",
                 "memberProfileId": member_profile_id or "",
                 "reason": reason,
-                "direction": "inbound",
+                "direction": map_entry.get("direction", "inbound") if isinstance(map_entry, dict) else "inbound",
             }
+            logger.info(f"[escalation] task direction={task_attrs['direction']!r} map_entry={map_entry!r}")
             if conference_sid:
                 task_attrs["conference"] = {
                     "sid": conference_sid,
@@ -723,13 +725,16 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
                 logger.error(f"[escalation] task creation exception: {e}", exc_info=True)
                 return False
 
+    pstn_direction = map_entry.get("direction", "inbound") if isinstance(map_entry, dict) else "inbound"
+    logger.info(f"[escalation] PSTN path direction={pstn_direction!r} map_entry={map_entry!r} map_entry_type={type(map_entry).__name__}")
     twiml = _build_flex_transfer_twiml(conv_id, reason, urgency, effective_queue,
                                        member_phone=member_phone,
                                        member_name=member_name,
                                        member_profile_id=member_profile_id,
                                        is_browser_call=False,
                                        cfg_phone=app_cfg.phone_number if app_cfg else "",
-                                       browser_caller_id=browser_caller_id)
+                                       browser_caller_id=browser_caller_id,
+                                       direction=pstn_direction)
     logger.info(f"[escalation] TwiML: {twiml}")
     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Calls/{call_sid}.json"
     headers = {"Content-Type": "application/x-www-form-urlencoded", **_twilio_basic_auth_header()}
@@ -917,6 +922,10 @@ async def _invoke_agent(session_id: str, prompt: str, system_prompt: str, contex
             logger.info(f"[{cfg.id}][escalate] agent requested escalation reason={esc_reason} urgency={esc_urgency}")
             if on_escalate:
                 await on_escalate(esc_reason, esc_urgency)
+            else:
+                # SMS/voice context: no Flex chat channel — fall back to outbound call
+                logger.info(f"[{cfg.id}][escalate] no on_escalate handler — falling back to outbound call")
+                asyncio.create_task(_trigger_outbound_call_by_profile(profile_id, member_phone, esc_reason, cfg=cfg, traits=member_traits or {}))
         elif msg_type == "tool_start":
             logger.info(f"[agent] tool_start tool={data.get('tool')}")
         elif msg_type == "tool_result":
@@ -1117,8 +1126,10 @@ class OwlVoiceChannel(VoiceChannel):
             session_id = conv_id
 
         if phone:
-            outbound_conversation_map[conv_id] = {"phone": phone, "profileId": member_profile_id or "", "browserCallerId": raw_from_num if is_browser_caller else ""}
-            logger.info(f"[setup] outbound_conversation_map[{conv_id}] phone={phone} profileId={member_profile_id or '(pending)'}")
+            call_direction = "outbound" if ctx else "inbound"
+            logger.info(f"[setup] direction={call_direction!r} ctx={bool(ctx)} raw_from_num={raw_from_num!r} is_browser_caller={is_browser_caller} phone={phone!r}")
+            outbound_conversation_map[conv_id] = {"phone": phone, "profileId": member_profile_id or "", "browserCallerId": raw_from_num if is_browser_caller else "", "direction": call_direction}
+            logger.info(f"[setup] outbound_conversation_map[{conv_id}] phone={phone} direction={call_direction} profileId={member_profile_id or '(pending)'}")
             if member_profile_id and cfg:
                 profile_app_map[member_profile_id] = cfg.route_prefix
             greeting = ctx.get("greeting", "") if ctx else ""
@@ -1392,6 +1403,27 @@ async def ci_webhook_proxy(request: Request) -> dict:
     except Exception as e:
         logger.error(f"[ci-webhook] proxy failed: {e}")
         return {"success": False}
+
+
+@app.api_route("/healthcare/api/{path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
+async def node_api_proxy(path: str, request: Request) -> Response:
+    """Proxy /healthcare/api/* requests to Node.js so the Flex plugin can use the TAC ngrok URL."""
+    url = f"http://localhost:{APP_PORT}/healthcare/api/{path}"
+    if request.query_params:
+        url += f"?{request.query_params}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.request(
+                method=request.method,
+                url=url,
+                headers={k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")},
+                content=await request.body(),
+                timeout=15,
+            )
+        return Response(content=res.content, status_code=res.status_code, media_type=res.headers.get("content-type"))
+    except Exception as e:
+        logger.error(f"[node-proxy] /healthcare/api/{path} failed: {e}")
+        return Response(content=b'{"error":"proxy failed"}', status_code=502, media_type="application/json")
 
 
 @app.post("/browser-answer-twiml")

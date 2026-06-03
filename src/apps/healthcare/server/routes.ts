@@ -150,6 +150,17 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     }
   });
 
+  app.get(`${px}/api/lookup-profile`, async (req, reply) => {
+    const { phone = '' } = req.query as Record<string, string>;
+    if (!phone) return reply.status(400).send({ profileId: null, error: 'phone required' });
+    try {
+      const profileId = await lookupProfileId(phone, creds);
+      reply.send({ profileId: profileId ?? null });
+    } catch (e) {
+      reply.status(500).send({ profileId: null, error: String(e) });
+    }
+  });
+
   app.get(`${px}/api/member-detail/:profileId/traits`, async (req, reply) => {
     const { profileId } = req.params as { profileId: string };
     try {
