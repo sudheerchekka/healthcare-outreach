@@ -35,7 +35,6 @@ const ADHERENCE_DEFAULT = [
   { category_key: 'Symptom Deep-Dive',            criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
   { category_key: 'Red Flag Symptom (Call 911)',  criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
   { category_key: 'Empathy',                      criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
-  { category_key: 'Wrap Up',                      criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
 ];
 
 function extractSentiment(data) {
