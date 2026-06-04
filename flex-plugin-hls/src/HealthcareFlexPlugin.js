@@ -3,7 +3,7 @@ import { Tab, withTaskContext, Manager } from '@twilio/flex-ui';
 import React from 'react';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'https://your-ngrok-domain.ngrok.io';
-const PLUGIN_VERSION = '1.2.0';
+const PLUGIN_VERSION = '1.3.0';
 
 // ── Design tokens ────────────────────────────────────────────────────────────
 
@@ -37,6 +37,25 @@ const ADHERENCE_DEFAULT = [
   { category_key: 'Empathy',                      criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
   { category_key: 'Wrap Up',                      criteria: [{ criteria_key: 'Goal' }, { criteria_key: 'Action' }] },
 ];
+
+function extractSentiment(data) {
+  const { operators = [], results = {} } = data;
+  const op = operators.find(o => /sentiment/i.test(o.label));
+  if (!op) return null;
+  return results[op.sid]?.result || null;
+}
+
+const SENTIMENT_CFG = {
+  positive: { icon: '😊', color: '#16a34a', bg: '#dcfce7', label: 'Positive' },
+  negative: { icon: '😟', color: '#dc2626', bg: '#fee2e2', label: 'Negative' },
+  neutral:  { icon: '😐', color: '#64748b', bg: '#f1f5f9', label: 'Neutral' },
+  mixed:    { icon: '😕', color: '#b45309', bg: '#fef3c7', label: 'Mixed' },
+};
+
+function sentimentCfg(val) {
+  const key = (val || '').toLowerCase().trim();
+  return SENTIMENT_CFG[key] || { icon: '❓', color: '#64748b', bg: '#f1f5f9', label: val || 'Unknown' };
+}
 
 function extractAdherence(data) {
   const { operators = [], results = {} } = data;
@@ -97,6 +116,18 @@ function CardBody({ children }) {
   }, children);
 }
 
+function traitLabel(key) {
+  return key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
+}
+
+function TraitFields({ traits }) {
+  const keys = Object.keys(traits || {}).filter(k => traits[k]);
+  if (!keys.length) return React.createElement(EmptyState, { icon: '—', message: 'No data.' });
+  return React.createElement(React.Fragment, null,
+    ...keys.map(k => React.createElement(Field, { key: k, label: traitLabel(k), value: String(traits[k]) }))
+  );
+}
+
 function Field({ label, value }) {
   if (!value) return null;
   return React.createElement('div', {
@@ -127,21 +158,138 @@ function Spinner() {
   }, 'Loading…');
 }
 
+// ── Sentiment Card ────────────────────────────────────────────────────────────
+
+function SentimentCard({ profileId }) {
+  const [sentiment, setSentiment] = React.useState(null);
+
+  React.useEffect(() => {
+    if (!profileId) return;
+    fetch(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}`)
+      .then(r => r.json())
+      .then(data => setSentiment(extractSentiment(data)))
+      .catch(() => {});
+    const es = new EventSource(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}/stream`);
+    es.onmessage = e => {
+      try {
+        const s = extractSentiment(JSON.parse(e.data));
+        if (s) setSentiment(s);
+      } catch {}
+    };
+    return () => es.close();
+  }, [profileId]);
+
+  const sc = sentiment ? sentimentCfg(sentiment) : null;
+
+  return React.createElement(Card, { style: { marginBottom: 0, minWidth: 0, overflow: 'hidden' } },
+    React.createElement(CardHeader, { icon: '🎭', title: 'Sentiment' }),
+    React.createElement(CardBody, null,
+      !sc
+        ? React.createElement(EmptyState, { icon: '⏳', message: 'Waiting for results…' })
+        : React.createElement('div', {
+            style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '12px 0', gap: '6px' }
+          },
+            React.createElement('span', { style: { fontSize: '32px' } }, sc.icon),
+            React.createElement('span', { style: { fontSize: '13px', fontWeight: 700, color: sc.color } }, sc.label),
+            React.createElement('span', { style: { fontSize: '10px', color: T.textDim } }, 'Member Sentiment'),
+          ),
+    ),
+  );
+}
+
 // ── Member Profile (CRM panel) ────────────────────────────────────────────────
+
+const ADHERENCE_STATUS_COLORS = { met: T.green, failed: T.red, partial: '#ea580c', pending: T.textDim };
+
+function AdherencePanel({ profileId, taskAccepted }) {
+  const [adherence, setAdherence] = React.useState(undefined);
+
+  React.useEffect(() => {
+    console.log('[AdherencePanel] useEffect profileId=', profileId);
+    if (!profileId) return;
+    fetch(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}`)
+      .then(r => r.json())
+      .then(data => setAdherence(extractAdherence(data)))
+      .catch(() => setAdherence(null));
+    const es = new EventSource(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}/stream`);
+    es.onmessage = e => {
+      try {
+        const parsed = JSON.parse(e.data);
+        const incoming = extractAdherence(parsed);
+        console.log('[AdherencePanel] SSE event operators=', parsed.operators?.length, 'adherence=', incoming);
+        if (!incoming) return;
+        // Merge: once a category is met, never downgrade it
+        setAdherence(prev => {
+          if (!prev) return incoming;
+          const prevMap = {};
+          prev.forEach(c => { prevMap[c.category_key] = c; });
+          return incoming.map(c => {
+            const isMet = v => v === 'Passed' || v === 'Succeeded';
+            const prevCat = prevMap[c.category_key];
+            const wasAlreadyMet = prevCat?.criteria?.every(cr => isMet(cr.criteria_met));
+            if (wasAlreadyMet) return prevCat;
+            return c;
+          });
+        });
+      } catch {}
+    };
+    return () => es.close();
+  }, [profileId]);
+
+  // Show all pending until agent accepts the task
+  const cats = buildCategories(taskAccepted ? (adherence === undefined ? null : adherence) : null);
+  const total = cats.length;
+  const metCount = cats.filter(c => c.status === 'met').length;
+
+  return React.createElement('div', { style: { padding: '8px 0' } },
+    React.createElement('div', {
+      style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }
+    },
+      React.createElement('span', { style: { fontSize: '11px', fontWeight: 700, color: T.textMid, textTransform: 'uppercase', letterSpacing: '0.04em' } }, 'Script Adherence'),
+      adherence !== undefined && React.createElement('span', {
+        style: { fontSize: '11px', fontWeight: 700, color: metCount === total ? T.green : T.brand }
+      }, `${metCount}/${total}`),
+    ),
+    !profileId
+      ? React.createElement('p', { style: { color: T.textDim, fontSize: '12px' } }, 'No profile ID in task attributes.')
+      : cats.map(({ cat, status }) =>
+          React.createElement('div', {
+            key: cat.category_key,
+            style: {
+              marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '8px',
+              padding: '6px 10px', borderRadius: '6px',
+              background: status === 'met' ? T.greenBg : T.slateBg,
+              border: `1px solid ${status === 'met' ? '#bbf7d0' : T.border}`,
+            }
+          },
+            React.createElement('input', { type: 'checkbox', checked: status === 'met', readOnly: true, style: { accentColor: T.green, width: '14px', height: '14px', flexShrink: 0 } }),
+            React.createElement('span', { style: { color: ADHERENCE_STATUS_COLORS[status], fontWeight: status === 'met' ? 600 : 400, fontSize: '12px' } }, cat.category_key),
+          )
+        ),
+  );
+}
 
 function MemberProfile({ task: taskProp }) {
   // CRMContainer doesn't inject task via withTaskContext — fall back to Flex store
   const task = taskProp || (() => {
-    const store = Manager.getInstance().store.getState();
-    const tasks = store?.flex?.worker?.tasks;
-    if (!tasks) return null;
-    const selected = store?.flex?.view?.selectedTaskSid;
-    if (selected) {
-      const t = tasks.get ? tasks.get(selected) : tasks[selected];
-      if (t) return t;
+    try {
+      const store = Manager.getInstance().store.getState();
+      const flexKeys = store?.flex ? Object.keys(store.flex) : [];
+      const tasks = store?.flex?.worker?.tasks;
+      const selected = store?.flex?.view?.selectedTaskSid;
+      console.log('[MemberProfile] store flex keys=', flexKeys, 'selected=', selected, 'tasks type=', tasks ? (tasks.get ? 'ImmutableMap' : 'plain') : 'null');
+      if (!tasks) return null;
+      if (selected) {
+        const t = tasks.get ? tasks.get(selected) : tasks[selected];
+        if (t) return t;
+      }
+      const all = tasks.valueSeq ? tasks.valueSeq().toArray() : Object.values(tasks);
+      console.log('[MemberProfile] fallback tasks count=', all.length);
+      return all[0] || null;
+    } catch (e) {
+      console.error('[MemberProfile] store lookup error', e);
+      return null;
     }
-    const all = tasks.valueSeq ? tasks.valueSeq().toArray() : Object.values(tasks);
-    return all[0] || null;
   })();
   console.log('[MemberProfile] render task=', task?.sid, 'attrs=', JSON.stringify(task?.attributes || {}));
   const memberProfileId = task?.attributes?.memberProfileId || '';
@@ -230,29 +378,15 @@ function MemberProfile({ task: taskProp }) {
       ),
     ),
 
-    // ── 2×2 responsive grid ───────────────────────────────────────────────────
+    // ── 3×2 responsive grid ───────────────────────────────────────────────────
     React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', width: '100%', boxSizing: 'border-box' } },
       React.createElement(Card, { style: { marginBottom: 0, minWidth: 0, overflow: 'hidden' } },
         React.createElement(CardHeader, { icon: '👤', title: 'Contact' }),
-        React.createElement(CardBody, null,
-          React.createElement(Field, { label: 'First Name', value: c.firstName }),
-          React.createElement(Field, { label: 'Last Name',  value: c.lastName }),
-          React.createElement(Field, { label: 'Phone',      value: c.phone }),
-          React.createElement(Field, { label: 'Member ID',  value: c.memberId }),
-          !Object.values(c).some(Boolean) && React.createElement(EmptyState, { icon: '—', message: 'No contact info.' }),
-        ),
+        React.createElement(CardBody, null, React.createElement(TraitFields, { traits: c })),
       ),
       React.createElement(Card, { style: { marginBottom: 0, minWidth: 0, overflow: 'hidden' } },
-        React.createElement(CardHeader, { icon: '📋', title: 'Outreach' }),
-        React.createElement(CardBody, null,
-          React.createElement(Field, { label: 'Status',            value: o.status }),
-          React.createElement(Field, { label: 'Next Follow-Up',    value: o.nextFollowUp }),
-          React.createElement(Field, { label: 'Follow-Up Details', value: o.nextFollowUpReason }),
-          React.createElement(Field, { label: 'Last Call Summary', value: o.lastCallSummary }),
-          React.createElement(Field, { label: 'Outreach Responses',value: o.outreachResponses }),
-          !o.nextFollowUp && !o.lastCallSummary && !o.status &&
-            React.createElement(EmptyState, { icon: '📭', message: 'No outreach data.' }),
-        ),
+        React.createElement(CardHeader, { icon: '📋', title: 'Care Plan' }),
+        React.createElement(CardBody, null, React.createElement(TraitFields, { traits: o })),
       ),
       React.createElement(Card, { style: { marginBottom: 0, minWidth: 0, overflow: 'hidden' } },
         React.createElement(CardHeader, { icon: '🔍', title: 'Observations',
@@ -277,7 +411,7 @@ function MemberProfile({ task: taskProp }) {
             ),
       ),
       React.createElement(Card, { style: { marginBottom: 0, minWidth: 0, overflow: 'hidden' } },
-        React.createElement(CardHeader, { icon: '📝', title: 'Summaries',
+        React.createElement(CardHeader, { icon: '📝', title: 'History',
           badge: summaries.length
             ? React.createElement('span', { style: { background: T.brandBg, color: T.brand, borderRadius: '9999px', padding: '1px 8px', fontSize: '11px', fontWeight: 700 } }, summaries.length)
             : null
@@ -298,52 +432,82 @@ function MemberProfile({ task: taskProp }) {
               )
             ),
       ),
+      // Adherence card (5th card in the 3×2 grid)
+      React.createElement(Card, { style: { marginBottom: 0, minWidth: 0, overflow: 'hidden' } },
+        React.createElement(CardHeader, { icon: '✅', title: 'Script Adherence' }),
+        React.createElement(CardBody, null,
+          React.createElement(AdherencePanel, {
+            profileId,
+            taskAccepted: (() => { console.log('[taskAccepted] task.status=', task?.status, 'taskStatus=', task?.taskStatus, 'reservation.status=', task?.reservation?.status); return task?.status === 'accepted' || task?.taskStatus === 'accepted' || task?.reservation?.status === 'accepted'; })(),
+          }),
+        ),
+      ),
+      // Sentiment card (6th card in the 3×2 grid)
+      React.createElement(SentimentCard, { profileId }),
     ),
 
-    // Footer
-    React.createElement('div', { style: { textAlign: 'center', fontSize: '10px', color: T.textDim, paddingBottom: '8px' } },
+    React.createElement('div', { style: { textAlign: 'center', fontSize: '10px', color: T.textDim, paddingBottom: '8px', marginTop: '4px' } },
       `v${PLUGIN_VERSION} · ${profileId}`
     ),
   );
 }
 
-// ── Script Adherence (Operators tab) ─────────────────────────────────────────
 
-const ADHERENCE_STATUS_COLORS = { met: T.green, failed: T.red, partial: '#ea580c', pending: T.textDim };
+// ── Transcript Tab ────────────────────────────────────────────────────────────
 
-function OperatorsTab({ task }) {
+function TranscriptTab({ task }) {
   const profileId = task?.attributes?.memberProfileId || '';
-  const [adherence, setAdherence] = React.useState(undefined);
+  const [messages, setMessages] = React.useState([]);
+  const bottomRef = React.useRef(null);
 
   React.useEffect(() => {
     if (!profileId) return;
-    fetch(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}`)
-      .then(r => r.json())
-      .then(data => setAdherence(extractAdherence(data)))
-      .catch(() => setAdherence(null));
-    const es = new EventSource(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}/stream`);
-    es.onmessage = e => { try { setAdherence(extractAdherence(JSON.parse(e.data))); } catch {} };
+    const es = new EventSource(`${BACKEND_URL}/healthcare/api/transcript/${encodeURIComponent(profileId)}/stream`);
+    es.onmessage = e => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.role && msg.text) setMessages(prev => [...prev, msg]);
+      } catch {}
+    };
     return () => es.close();
   }, [profileId]);
 
-  const cats = buildCategories(adherence === undefined ? null : adherence);
+  React.useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
-  return React.createElement('div', {
-    style: { padding: '16px', fontFamily: "'Inter','Segoe UI',sans-serif", fontSize: '13px', overflowY: 'auto' }
-  },
-    React.createElement('h3', { style: { marginTop: 0, marginBottom: '12px', fontSize: '13px', fontWeight: 700, color: T.textMid, textTransform: 'uppercase', letterSpacing: '0.05em' } }, 'Script Adherence'),
-    !profileId
-      ? React.createElement('p', { style: { color: T.textDim } }, 'No profile ID in task attributes.')
-      : cats.map(({ cat, status }) =>
+  const wrap = { padding: '12px', fontFamily: "'Inter','Segoe UI',sans-serif", overflowY: 'auto', height: '100%', boxSizing: 'border-box', background: '#f8fafc' };
+
+  if (!profileId) return React.createElement('div', { style: wrap },
+    React.createElement('p', { style: { color: '#94a3b8', fontSize: '12px', textAlign: 'center', marginTop: '20px' } }, 'No profile ID in task attributes.')
+  );
+
+  return React.createElement('div', { style: wrap },
+    messages.length === 0
+      ? React.createElement('p', { style: { color: '#94a3b8', fontSize: '12px', textAlign: 'center', marginTop: '20px' } }, 'No transcript yet.')
+      : messages.map((msg, i) =>
           React.createElement('div', {
-            key: cat.category_key,
-            style: { marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', borderRadius: '6px', background: status === 'met' ? T.greenBg : T.slateBg }
+            key: i,
+            style: { marginBottom: '10px', display: 'flex', flexDirection: msg.role === 'agent' ? 'row' : 'row-reverse', gap: '8px', alignItems: 'flex-start' }
           },
-            React.createElement('input', { type: 'checkbox', checked: status === 'met', readOnly: true, style: { accentColor: T.green, width: '14px', height: '14px', flexShrink: 0 } }),
-            React.createElement('span', { style: { color: ADHERENCE_STATUS_COLORS[status], fontWeight: status === 'met' ? 600 : 400, fontSize: '12px' } }, cat.category_key),
+            React.createElement('div', {
+              style: {
+                maxWidth: '80%', padding: '8px 12px', borderRadius: '10px',
+                fontSize: '12px', lineHeight: 1.5,
+                background: msg.role === 'agent' ? '#fff' : '#EFF6FF',
+                color: '#0f172a', border: '1px solid #e2e8f0',
+                boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+              }
+            },
+              React.createElement('div', {
+                style: { fontSize: '9px', fontWeight: 700, marginBottom: '3px', textTransform: 'uppercase', color: msg.role === 'agent' ? '#0263E0' : '#64748b' }
+              }, msg.role === 'agent' ? '🤖 AI Agent' : '👤 Member'),
+              msg.text,
+              msg.ts && React.createElement('div', { style: { fontSize: '9px', color: '#94a3b8', marginTop: '3px' } }, msg.ts),
+            )
           )
         ),
-    React.createElement('p', { style: { color: T.textDim, fontSize: '10px', marginTop: '16px' } }, `v${PLUGIN_VERSION} · ${profileId || 'no profile'}`),
+    React.createElement('div', { ref: bottomRef })
   );
 }
 
@@ -357,19 +521,19 @@ export default class HealthcareFlexPlugin extends FlexPlugin {
   async init(flex, _manager) {
     console.log(`[HealthcareFlexPlugin] v${PLUGIN_VERSION} loaded — backend: ${BACKEND_URL}`);
 
-    // Always show member profile — replace CRM container for all task types
+    // Member profile in CRM container
     const MemberProfileWithContext = withTaskContext(MemberProfile);
     flex.CRMContainer.Content.replace(
       React.createElement(MemberProfileWithContext, { key: 'member-profile-crm' })
     );
 
-    // Operators tab — all tasks
-    const OperatorsTabWithContext = withTaskContext(OperatorsTab);
+    // Transcript tab in TaskCanvasTabs
+    const TranscriptTabWithContext = withTaskContext(TranscriptTab);
     flex.TaskCanvasTabs.Content.add(
-      React.createElement(Tab, { key: 'operators-tab', label: 'Operators', uniqueName: 'operators-tab' },
-        React.createElement(OperatorsTabWithContext, { key: 'operators-tab-content' })
+      React.createElement(Tab, { key: 'transcript-tab', uniqueName: 'transcript-tab', label: 'Transcript' },
+        React.createElement(TranscriptTabWithContext, { key: 'transcript-tab-content' })
       ),
-      { sortOrder: 10 }
+      { sortOrder: 5 }
     );
   }
 }

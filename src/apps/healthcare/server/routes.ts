@@ -230,10 +230,12 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     raw.write(`data: ${JSON.stringify({ operators: cfg.ciOperators, results: cached })}\n\n`);
     if (!ciSseClients.has(profileId)) ciSseClients.set(profileId, new Set());
     ciSseClients.get(profileId)!.add(raw);
+    console.log(`[CI] SSE client connected profileId=${profileId} total=${ciSseClients.get(profileId)!.size}`);
     const ping = setInterval(() => raw.write(': ping\n\n'), 25000);
     req.raw.on('close', () => {
       clearInterval(ping);
       ciSseClients.get(profileId)?.delete(raw);
+      console.log(`[CI] SSE client disconnected profileId=${profileId} remaining=${ciSseClients.get(profileId)?.size ?? 0}`);
     });
   });
 
@@ -673,7 +675,9 @@ export async function handleCiWebhook(
       existing[operatorId] = { label: liveOp.label, result: liveText, json: liveJson, ts: formatTimestampPST() };
       ciLiveResults.set(profileId, existing);
       const event = JSON.stringify({ operators: cfg.ciOperators, results: existing });
-      ciSseClients.get(profileId)?.forEach(client => client.write(`data: ${event}\n\n`));
+      const sseClients = ciSseClients.get(profileId);
+      console.log(`[CI] SSE push profileId=${profileId} operatorId=${operatorId} label=${liveOp.label} clients=${sseClients?.size ?? 0}`);
+      sseClients?.forEach(client => client.write(`data: ${event}\n\n`));
     }
 
     if (isSummaryOp && !summaryText) {

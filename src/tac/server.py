@@ -37,7 +37,7 @@ from base64 import b64encode
 from xml.sax.saxutils import escape
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response, JSONResponse, StreamingResponse
 
 from bedrock_agentcore.runtime import AgentCoreRuntimeClient
 from tac import TAC, TACConfig
@@ -1411,15 +1411,23 @@ async def node_api_proxy(path: str, request: Request) -> Response:
     url = f"http://localhost:{APP_PORT}/healthcare/api/{path}"
     if request.query_params:
         url += f"?{request.query_params}"
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")}
+    body = await request.body()
     try:
+        if "stream" in path:
+            # SSE endpoint — stream without buffering
+            async def _sse_gen():
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream(request.method, url, headers=headers, content=body) as res:
+                        async for chunk in res.aiter_bytes():
+                            yield chunk
+            return StreamingResponse(_sse_gen(), media_type="text/event-stream", headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+            })
         async with httpx.AsyncClient() as client:
-            res = await client.request(
-                method=request.method,
-                url=url,
-                headers={k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")},
-                content=await request.body(),
-                timeout=15,
-            )
+            res = await client.request(method=request.method, url=url, headers=headers, content=body, timeout=15)
         return Response(content=res.content, status_code=res.status_code, media_type=res.headers.get("content-type"))
     except Exception as e:
         logger.error(f"[node-proxy] /healthcare/api/{path} failed: {e}")

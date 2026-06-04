@@ -547,6 +547,7 @@
   }
 
   /* ── Traits ──────────────────────────────────────────────────── */
+  // Friendly labels for known keys — unknown keys fall back to the key name itself
   const TRAIT_LABELS = {
     Contact:  { firstName: 'First Name', lastName: 'Last Name', phone: 'Phone', memberId: 'Member ID' },
     outreach: { nextFollowUp: 'Next Follow-up', nextFollowUpReason: 'Follow-up Reason', status: 'Status', lastCallSummary: 'Last Call Summary', outreachResponses: 'Outreach Responses' },
@@ -566,10 +567,10 @@
 
   function renderTraitGroup(containerId, group, traits) {
     const labels = TRAIT_LABELS[group] || {};
-    const keys   = Object.keys(labels);
+    const keys   = Object.keys(traits);
     const html   = keys.map(key => {
       const val   = traits[key] ?? '';
-      const label = labels[key] || key;
+      const label = labels[key] || key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
       return `<div class="trait-row">
         <span class="trait-key">${escHtml(label)}</span>
         <input class="trait-input" data-group="${escHtml(group)}" data-key="${escHtml(key)}"
