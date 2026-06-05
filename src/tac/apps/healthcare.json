@@ -14,7 +14,7 @@
   "memory_api_token_env": "TWILIO_API_TOKEN",
   "flex_queue": "healthcare",
   "flex_escalation_announcement": "Of course! Let me connect you with one of our care specialists right away. Please hold for just a moment.",
-  "inbound_greeting": "Hello! This is the Owl Health Care Team. How can I assist you today?",
+  "inbound_greeting": "",
   "default_outbound_greeting": "Hello! This is the Owl Health Care Team.",
   "outbound_system_prompt_prefix": "You are calling {name} on behalf of the Owl Health care team.",
   "system_prompt_inbound_file": "system_prompt_inbound.txt",

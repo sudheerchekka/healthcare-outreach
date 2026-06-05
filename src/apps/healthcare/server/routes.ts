@@ -71,13 +71,14 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
       ciPendingTraits.delete(profileId);
       ciFlushTimers.delete(profileId);
       if (!traits) return;
+      if (!creds.storeId) { console.warn(`[${cfg.id}][CI] skipping flush — memoryStoreId not configured`); return; }
       try {
         const profile = await fetchProfile(profileId, creds);
         const existingOutreach = (profile?.traits?.outreach ?? {}) as Record<string, unknown>;
         await updateProfileTraits(profileId, 'outreach', { ...existingOutreach, ...traits }, creds);
         console.log(`[${cfg.id}][CI] flushed profileId=${profileId} traits=${Object.keys(traits).join(', ')}`);
-      } catch (e) {
-        console.error(`[${cfg.id}][CI] flush FAILED profileId=${profileId}:`, e);
+      } catch (e: any) {
+        console.error(`[${cfg.id}][CI] flush FAILED profileId=${profileId} storeId=${creds.storeId}:`, e?.response?.config?.url ?? e);
       }
     }, 3000));
   }
@@ -347,6 +348,18 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     }
     try {
       const msg = await twilioClient!.messages.create({ to: sendTo, from: cfg.phoneNumber, body: smsBody });
+
+      // Write outbound SMS to conversation memory as an observation
+      const memberPhone = normalizePhone(phone);
+      const profileId   = await lookupProfileId(memberPhone, creds);
+      if (profileId) {
+        memoryAxios.post(
+          `${MEMORY_BASE}/v1/Stores/${cfg.memoryStoreId}/Profiles/${profileId}/Observations`,
+          { observations: [{ content: `[SMS outbound] ${smsBody}`, occurredAt: new Date().toISOString(), source: 'admin-sms' }] },
+          { auth: memoryAuth },
+        ).catch(e => console.warn(`[send-sms] memory write failed: ${e.message}`));
+      }
+
       reply.send({ success: true, message_sid: msg.sid });
     } catch (e) {
       reply.status(500).send({ success: false, error: String(e) });

@@ -6,7 +6,7 @@ export const MEMORY_BASE = 'https://memory.twilio.com';
 const memoryAxios = axios.create();
 
 // Legacy module-level values (healthcare defaults) kept for backwards compat
-export const MEMORY_STORE_ID = process.env.HEALTHCARE_MEMORY_STORE_ID ?? process.env.MEMORY_STORE_ID ?? '';
+export const MEMORY_STORE_ID = process.env.MEMORY_STORE_ID;
 const API_KEY   = process.env.TWILIO_API_KEY ?? '';
 const API_TOKEN = process.env.TWILIO_API_TOKEN ?? '';
 export const memoryAuth = { username: API_KEY, password: API_TOKEN };

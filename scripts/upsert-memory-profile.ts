@@ -48,6 +48,8 @@ const CONTACT_TRAITS: Record<string, string> = {
   dateOfBirth: 'Jan 12, 1983',
   nextApptDate: 'June 15, 2026',
   nextApptTime: '11:00am',
+  claimStatus: 'partially approved',
+  claimStatusReason: 'partial approval due to the deductible'
 };
 
 const OUTREACH_TRAITS: Record<string, string> = {

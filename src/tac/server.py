@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import re as _re
 import pathlib
 import time
 from collections.abc import AsyncGenerator
@@ -828,6 +829,7 @@ def _fetch_memory(profile_id: str, cfg: "AppConfig") -> Optional[TACMemoryRespon
         return None
 
 
+
 async def _prefetch_memory(phone: str, cfg: "AppConfig", profile_id: Optional[str] = None) -> tuple[Optional[TACMemoryResponse], dict]:
     """Run blocking memory + traits fetch in thread pool. Returns (memory, traits)."""
     loop = asyncio.get_event_loop()
@@ -851,18 +853,23 @@ async def _prefetch_memory(phone: str, cfg: "AppConfig", profile_id: Optional[st
         return None, {}
 
 
+_TRAIT_SKIP = {"firstName", "lastName", "name"}  # handled separately as full name
+
 def _build_memory_context(memory: Optional[TACMemoryResponse], traits: Optional[dict] = None) -> str:
     sections = []
     if traits:
         trait_lines = []
         full_name = (f"{traits.get('firstName', '')} {traits.get('lastName', '')}".strip()
                      or traits.get("name", ""))
-        if full_name:          trait_lines.append(f"- Name: {full_name}")
-        if traits.get("phone"):       trait_lines.append(f"- Phone: {traits['phone']}")
-        if traits.get("nextFollowUp"): trait_lines.append(f"- Next follow-up goal: {traits['nextFollowUp']}")
-        if traits.get("nextFollowUpReason"): trait_lines.append(f"- Follow-up details: {traits['nextFollowUpReason']}")
-        if traits.get("status"):      trait_lines.append(f"- Outreach status: {traits['status']}")
-        if traits.get("lastCallSummary"): trait_lines.append(f"- Last call summary: {traits['lastCallSummary']}")
+        if full_name:
+            trait_lines.append(f"- Name: {full_name}")
+        # Include all remaining traits dynamically
+        for key, val in traits.items():
+            if key in _TRAIT_SKIP or not val:
+                continue
+            label = key.replace("_", " ").replace("-", " ")
+            label = _re.sub(r'([A-Z])', r' \1', label).strip().capitalize()
+            trait_lines.append(f"- {label}: {val}")
         if trait_lines:
             sections.append("### Member Profile\n" + "\n".join(trait_lines))
     if memory and memory.observations:
@@ -1203,6 +1210,7 @@ async def handle_message_ready(
             else:
                 traits = {}
             mem_ctx = _build_memory_context(memory_response, traits)
+
         greeting = greeting_cache.get(conv_id)
         bedrock_mode = os.environ.get("BEDROCK_AGENT_MODE") == "agentcore"
         if greeting and bedrock_mode:
@@ -1210,6 +1218,7 @@ async def handle_message_ready(
         else:
             enriched = mem_ctx
         memory_context_cache[conv_id] = enriched
+        logger.info(f"[{cfg.id}] memory context for agent (turn 1):\n{enriched or '(empty)'}")
     else:
         enriched = ""
 
@@ -1261,6 +1270,12 @@ async def handle_message_ready(
                         escalated = await _escalate_call_to_flex(conv_id=conv_id, reason=reason, urgency=urgency, target_queue=target_queue)
                         if not escalated:
                             yield " Unfortunately I wasn't able to complete the transfer. Please try again."
+                        else:
+                            try:
+                                await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
+                                logger.info(f"[{cfg.id}][escalation] CO conversation closed after handoff conv_id={conv_id}")
+                            except Exception as _ce:
+                                logger.warning(f"[{cfg.id}][escalation] close CO conv failed: {_ce}")
                         break
                     elif msg_type == "tool_start":
                         logger.info(f"[agent] tool_start tool={data.get('tool')}")
@@ -1490,6 +1505,8 @@ async def twiml_shared(request: Request) -> Response:
     """Shared inbound voice webhook — dispatches to the right app by To number."""
     form = {k: str(v) for k, v in (await request.form()).items()}
     to_phone = form.get("To", "")
+    from_phone_log = form.get("From", "")
+    logger.info(f"[twiml] inbound call To={to_phone} From={from_phone_log}")
     cfg = _PHONE_TO_APP.get(to_phone)
     if not cfg and ALL_APPS:
         cfg = next(iter(ALL_APPS.values()))
@@ -1503,13 +1520,38 @@ async def twiml_shared(request: Request) -> Response:
     ws_url = f"{ws_proto}://{host}{cfg.route_prefix}/ws"
     callback_url = f"{proto}://{host}{cfg.route_prefix}/conversation-relay-callback"
 
+    # Build personalized greeting using caller's profile if available
+    from_phone = form.get("From", "")
+    greeting = cfg.inbound_greeting  # default (may be empty string)
+    logger.info(f"[twiml] from_phone={from_phone!r} cfg.inbound_greeting={greeting!r}")
+    if from_phone and not greeting:
+        try:
+            loop = asyncio.get_event_loop()
+            profile_id = await loop.run_in_executor(None, _lookup_profile_id, from_phone, cfg)
+            logger.info(f"[twiml] profile_id={profile_id!r} for from_phone={from_phone!r}")
+            if profile_id:
+                traits = await loop.run_in_executor(None, _fetch_profile_traits, profile_id, cfg)
+                logger.info(f"[twiml] traits keys={list(traits.keys())}")
+                first_name = traits.get("firstName", "") or (traits.get("name", "").split()[0] if traits.get("name") else "")
+                logger.info(f"[twiml] first_name={first_name!r}")
+                if first_name:
+                    greeting = f"Hi {first_name}, this is your Owl Health care coordinator. How can I help you today?"
+                    logger.info(f"[twiml] personalized greeting set: {greeting!r}")
+        except Exception as e:
+            logger.warning(f"[twiml] greeting lookup failed: {e}")
+    else:
+        logger.info(f"[twiml] skipping lookup — from_phone empty or greeting already set")
+
     twiml = await voice_channel.handle_incoming_call(
         to_number=form.get("To", ""),
-        from_number=form.get("From", ""),
+        from_number=from_phone,
         options={"websocket_url": ws_url, "action_url": callback_url,
-                 "welcome_greeting": cfg.inbound_greeting},
+                 "welcome_greeting": greeting},
         call_sid=form.get("CallSid", ""),
     )
+    # Reduce interrupt sensitivity — inject interruptible="false" so agent isn't
+    # cut off by background noise. Member can still interrupt by speaking clearly.
+    twiml = twiml.replace("<ConversationRelay ", '<ConversationRelay interruptible="true" ', 1)
     return Response(content=twiml, media_type="application/xml")
 
 
