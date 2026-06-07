@@ -203,6 +203,16 @@ const ADHERENCE_STATUS_COLORS = { met: T.green, failed: T.red, partial: '#ea580c
 function AdherencePanel({ profileId, taskAccepted }) {
   const [adherence, setAdherence] = React.useState(undefined);
 
+  // Reset to all-pending whenever the task is accepted (new call starting)
+  React.useEffect(() => {
+    if (taskAccepted && profileId) {
+      setAdherence(undefined);
+      // Clear stale CI results from previous call on the server
+      fetch(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}`, { method: 'DELETE' })
+        .catch(() => {});
+    }
+  }, [taskAccepted, profileId]);
+
   React.useEffect(() => {
     console.log('[AdherencePanel] useEffect profileId=', profileId);
     if (!profileId) return;

@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import pathlib
+import httpx
 from strands import Agent, tool
 from strands.types.content import Messages
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
@@ -60,6 +61,10 @@ def _load_system_prompt() -> str:
 
 SYSTEM_PROMPT = _load_system_prompt()
 
+KNOWLEDGE_BASE_ID  = os.environ.get("HEALTHCARE_KB_ID", "")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_TAC_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_TAC_AUTH_TOKEN", "")
+
 escalation_state: dict = {}
 schedule_call_state: dict = {}
 
@@ -94,6 +99,35 @@ def escalate_to_human(reason: str = "member_requested_human", urgency: str = "no
     escalation_state["urgency"] = urgency
     log.info(f"[escalation] escalate_to_human called reason={reason} urgency={urgency}")
     return json.dumps({"escalate": True, "reason": reason, "urgency": urgency})
+
+
+@tool
+def search_knowledge_base(query: str) -> str:
+    """Search the Owl Health knowledge base for clinical guidelines, OTC card FAQs, policies, and FAQs.
+
+    Use this when the member asks about specific health policies, procedures,
+    medications, eligibility, or anything requiring accurate reference information.
+    Do not guess at clinical or policy details — search first.
+    query: a clear question or topic to search for.
+    """
+    if not KNOWLEDGE_BASE_ID:
+        log.warning("[kb] HEALTHCARE_KB_ID not set — knowledge base unavailable")
+        return "Knowledge base not configured."
+    try:
+        res = httpx.post(
+            f"https://knowledge.twilio.com/v1/KnowledgeBases/{KNOWLEDGE_BASE_ID}/Search",
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            json={"query": query, "top": 3},
+            timeout=5,
+        )
+        chunks = res.json().get("chunks", [])
+        log.info(f"[kb] search query=\"{query[:60]}\" status={res.status_code} chunks={len(chunks)}")
+        if not chunks:
+            return "No relevant information found in the knowledge base."
+        return "\n\n".join(c["content"] for c in chunks if c.get("content"))
+    except Exception as e:
+        log.warning(f"[kb] search failed: {e}")
+        return "Knowledge base search is currently unavailable."
 
 
 def turns_to_messages(turns: list) -> Messages:
@@ -197,10 +231,14 @@ async def invoke(payload, context):
         log.warning(f"[STM] dropping history — last role={prior_messages[-1]['role']}, must end with assistant")
         prior_messages = []
 
+    _tools = [escalate_to_human, schedule_call]
+    if KNOWLEDGE_BASE_ID:
+        _tools.append(search_knowledge_base)
     agent = Agent(
         model=load_model(),
         system_prompt=effective_system_prompt,
         messages=prior_messages,
+        tools=_tools,
     )
 
     full_reply = ""
@@ -269,6 +307,9 @@ async def handle_voice_websocket(websocket, request_context=None):
         full_reply = ""
         try:
             async for event in agent_instance.stream_async(input_text):
+                event_keys = list(event.keys()) if isinstance(event, dict) else type(event).__name__
+                if event_keys not in (["data"],):
+                    log.info(f"[ws] non-text event keys={event_keys} preview={str(event)[:200]}")
                 if "data" in event and isinstance(event["data"], str):
                     token = event["data"]
                     full_reply += token
@@ -331,7 +372,10 @@ async def handle_voice_websocket(websocket, request_context=None):
                 if agent is None:
                     base_system = SYSTEM_PROMPT
                     effective_system = f"{base_system}\n\n{system_prompt}" if system_prompt else base_system
-                    agent = Agent(model=load_model(), system_prompt=effective_system, tools=[escalate_to_human, schedule_call])
+                    _ws_tools = [escalate_to_human, schedule_call]
+                    if KNOWLEDGE_BASE_ID:
+                        _ws_tools.append(search_knowledge_base)
+                    agent = Agent(model=load_model(), system_prompt=effective_system, tools=_ws_tools)
                     log.info(f"[ws] agent created system_prompt_len={len(effective_system)}")
 
                 input_text = (
