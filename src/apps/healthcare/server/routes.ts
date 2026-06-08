@@ -636,7 +636,14 @@ export async function handleCiWebhook(
     if (tacData.profileId) profileId = tacData.profileId;
   } catch { /* ignore */ }
 
-  if (!profileId && memberPhone) profileId = await lookupProfileId(memberPhone, creds);
+  // Only process CI results from AI agent conversations — those tracked by TAC
+  // If TAC has no phone record for this convId, it's a Flex/human agent conversation
+  if (!memberPhone) {
+    console.log(`[CI] skipping conv_id=${convId} — no TAC record (likely human agent conversation)`);
+    return;
+  }
+
+  if (!profileId) profileId = await lookupProfileId(memberPhone, creds);
 
   let summaryText = '';
   let outreachAnalysis = '';
