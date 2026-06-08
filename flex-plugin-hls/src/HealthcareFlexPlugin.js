@@ -203,9 +203,12 @@ const ADHERENCE_STATUS_COLORS = { met: T.green, failed: T.red, partial: '#ea580c
 function AdherencePanel({ profileId, taskAccepted }) {
   const [adherence, setAdherence] = React.useState(undefined);
 
+  const acceptedAtRef = React.useRef(0);
+
   // Reset to all-pending whenever the task is accepted (new call starting)
   React.useEffect(() => {
     if (taskAccepted && profileId) {
+      acceptedAtRef.current = Date.now();
       setAdherence(undefined);
       // Clear stale CI results from previous call on the server
       fetch(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}`, { method: 'DELETE' })
@@ -216,17 +219,25 @@ function AdherencePanel({ profileId, taskAccepted }) {
   React.useEffect(() => {
     console.log('[AdherencePanel] useEffect profileId=', profileId);
     if (!profileId) return;
-    fetch(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}`)
-      .then(r => r.json())
-      .then(data => setAdherence(extractAdherence(data)))
-      .catch(() => setAdherence(null));
+    // Only load initial results if task already accepted
+    if (taskAccepted) {
+      const fetchedAt = Date.now();
+      fetch(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}`)
+        .then(r => r.json())
+        .then(data => {
+          // Ignore if this fetch started before acceptance (stale)
+          if (fetchedAt >= acceptedAtRef.current) setAdherence(extractAdherence(data));
+        })
+        .catch(() => setAdherence(null));
+    }
     const es = new EventSource(`${BACKEND_URL}/healthcare/api/ci-results/${encodeURIComponent(profileId)}/stream`);
     es.onmessage = e => {
       try {
         const parsed = JSON.parse(e.data);
         const incoming = extractAdherence(parsed);
         console.log('[AdherencePanel] SSE event operators=', parsed.operators?.length, 'adherence=', incoming);
-        if (!incoming) return;
+        // Ignore CI results that arrive before the task was accepted
+        if (!incoming || !taskAccepted) return;
         // Merge: once a category is met, never downgrade it
         setAdherence(prev => {
           if (!prev) return incoming;

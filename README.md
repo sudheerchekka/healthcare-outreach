@@ -306,7 +306,7 @@ cd src/tac
 python3 -m venv .venv          # first time only
 source .venv/bin/activate
 pip install -r requirements.txt  # first time only
-AWS_PROFILE=<profile_name> uvicorn server:app --port 8000 --reload
+AWS_PROFILE=<profile_name> .venv/bin/python -m uvicorn server:app --port 8000 --reload
 ```
 
 ### 3. Start the Node.js app server (port 8001)

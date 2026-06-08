@@ -52,6 +52,21 @@ def register_app_routes(app, cfg, voice_channel, pending_outbound_context,
         greeting = ctx.get("greeting", "") if ctx else cfg.default_outbound_greeting
         form = {k: str(v) for k, v in (await request.form()).items()}
         call_sid = form.get("CallSid", "")
+
+        # Push greeting to transcript immediately — we know phone and can look up profile
+        if greeting and ctx:
+            member_phone = ctx.get("phone", "")
+            if member_phone:
+                try:
+                    loop = asyncio.get_event_loop()
+                    profile_id_for_transcript = await loop.run_in_executor(None, _lookup_profile_id, member_phone, cfg)
+                    if profile_id_for_transcript:
+                        from datetime import datetime, timezone, timedelta
+                        greeting_ts = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+                        asyncio.create_task(_push_transcript_event(profile_id_for_transcript, "agent", greeting, ts=greeting_ts))
+                        logger.info(f"[twiml-outbound] pushed greeting to transcript profileId={profile_id_for_transcript}")
+                except Exception as _e:
+                    logger.warning(f"[twiml-outbound] transcript greeting push failed: {_e}")
         if conv_id and call_sid:
             pending_call_sid_map[conv_id] = call_sid
         # Track which app owns this conv
@@ -105,15 +120,13 @@ def register_app_routes(app, cfg, voice_channel, pending_outbound_context,
             return Response(content=twiml_dtf, media_type="application/xml")
 
         twiml = await voice_channel.handle_incoming_call(
-            to_number=raw_from if is_outbound else raw_to,
-            from_number=raw_to if is_outbound else raw_from,
             options={
                 "websocket_url": ws_url, "action_url": callback_url,
                 "welcome_greeting": greeting,
                 "custom_parameters": custom_params,
             },
-            call_sid=call_sid,
         )
+        twiml = twiml.replace("<ConversationRelay ", '<ConversationRelay interruptible="true" ', 1)
         return Response(content=twiml, media_type="application/xml")
 
     @app.websocket(f"{px}/ws")

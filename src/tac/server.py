@@ -8,19 +8,6 @@ URL-prefixed routes: /{app}/twiml, /{app}/ws, /{app}/sms, etc.
 Shared routes (no prefix): /health, /get-outbound-phone/{conv_id}, /ci-webhook
 """
 
-# Patch importlib.metadata.version before any tac imports.
-# The TAC SDK calls version("tac") but the package is named "twilio-agent-connect".
-import importlib.metadata as _meta
-_orig_version = _meta.version
-def _patched_version(name: str) -> str:
-    try:
-        return _orig_version(name)
-    except _meta.PackageNotFoundError:
-        if name == "tac":
-            return _orig_version("twilio-agent-connect")
-        raise
-_meta.version = _patched_version  # type: ignore[assignment]
-
 import asyncio
 import json
 import logging
@@ -71,8 +58,8 @@ PUBLIC_DOMAIN = (os.environ.get("VOICE_PUBLIC_DOMAIN") or "").lstrip("https://")
 TAC_PORT = int(os.environ.get("TAC_PORT", "8000"))
 APP_PORT = int(os.environ.get("APP_PORT", "8001"))
 
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_TAC_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_TAC_AUTH_TOKEN", "")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "")
 ESCALATION_ENABLED = os.environ.get("ESCALATION_ENABLED", "false").lower() in ("1", "true", "yes")
 FLEX_HANDOFF_APPLICATION_SID = os.environ.get("TWILIO_FLEX_HANDOFF_APPLICATION_SID", "")
 FLEX_WORKFLOW_SID = os.environ.get("TWILIO_FLEX_WORKFLOW_SID", "")
@@ -382,6 +369,7 @@ conversation_call_sid_map: dict[str, str] = {}
 pending_call_sid_map: dict[str, str] = {}
 system_prompt_cache: dict[str, str] = {}
 greeting_cache: dict[str, str] = {}
+_greeting_by_phone: dict[str, str] = {}   # phone → greeting text, set at /twiml time
 memory_context_cache: dict[str, str] = {}
 # Maps conv_id → route_prefix so shared endpoints can find the right app
 conv_app_map: dict[str, str] = {}
@@ -601,6 +589,15 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
             member_name = ctx.get("name", "")
         if not member_phone:
             member_phone = ctx.get("phone", "")
+    # If profile_id still missing, look it up from phone
+    if not member_profile_id and member_phone and app_cfg:
+        try:
+            member_profile_id = await asyncio.get_event_loop().run_in_executor(
+                None, _lookup_profile_id, member_phone, app_cfg
+            )
+            logger.info(f"[escalation] profile lookup result profileId={member_profile_id or '(not found)'}")
+        except Exception as _e:
+            logger.warning(f"[escalation] profile lookup failed: {_e}")
     logger.info(f"[escalation] resolved member_phone={member_phone or '(unknown)'} member_name={member_name or '(unknown)'} member_profile_id={member_profile_id or '(unknown)'}")
 
     # Detect browser/WebRTC call: outbound_conversation_map entry has no "from_pstn" marker,
@@ -715,7 +712,7 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
                         logger.info(f"[escalation] stored task_sid={task_sid} conv_id={conv_id} profileId={member_profile_id}")
                     logger.info(f"[escalation] ✓ browser escalation complete conv_id={conv_id}")
                     try:
-                        await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
+                        await tac.conversation_orchestrator_client.update_conversation(conv_id, status="CLOSED")
                     except Exception as e:
                         logger.error(f"[escalation] failed to close conversation: {e}")
                     return True
@@ -753,7 +750,7 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
         logger.info(f"[escalation] ✓ transferred conv_id={conv_id} call_sid={call_sid} reason={reason} urgency={urgency} queue={effective_queue}")
 
         try:
-            await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
+            await tac.conversation_orchestrator_client.update_conversation(conv_id, status="CLOSED")
             logger.info(f"[escalation] closed Maestro conversation convId={conv_id}")
         except Exception as e:
             logger.error(f"[escalation] failed to close conversation convId={conv_id}: {e}")
@@ -983,12 +980,15 @@ async def _trigger_outbound_call_by_profile(profile_id: str, phone: str, reason:
         logger.error(f"[schedule_call] failed to trigger call: {e}", exc_info=True)
 
 
-async def _push_transcript_event(profile_id: str, role: str, text: str, route_prefix: str = "") -> None:
+async def _push_transcript_event(profile_id: str, role: str, text: str, route_prefix: str = "", ts: str = "") -> None:
     try:
+        payload: dict = {"profileId": profile_id, "role": role, "text": text}
+        if ts:
+            payload["ts"] = ts
         async with httpx.AsyncClient() as client:
             await client.post(
                 f"http://localhost:{APP_PORT}/transcript-event",
-                json={"profileId": profile_id, "role": role, "text": text},
+                json=payload,
                 timeout=3,
             )
     except Exception as e:
@@ -1067,7 +1067,79 @@ class OwlVoiceChannel(VoiceChannel):
     """VoiceChannel subclass that populates author_info, maps outbound conv_ids,
     and pre-warms the agent backend + memory before the member speaks."""
 
+    async def _cleanup_connection(self, conv_id: str) -> None:
+        """Override to always close CO conversation on WebSocket disconnect."""
+        await super()._cleanup_connection(conv_id)
+        try:
+            await tac.conversation_orchestrator_client.update_conversation(conv_id, status="CLOSED")
+            logger.info(f"[cleanup] CO conversation closed conv_id={conv_id}")
+        except Exception as e:
+            if "400" not in str(e) and "already" not in str(e).lower():
+                logger.warning(f"[cleanup] close CO conv failed: {e}")
+
+    async def _initialize_conversation(self, call_sid: str, setup_msg, websocket):
+        """Override to capture call_sid → conv_id mapping for Flex escalation."""
+        conv_id, session_state = await super()._initialize_conversation(call_sid, setup_msg, websocket)
+        if conv_id and call_sid:
+            conversation_call_sid_map[conv_id] = call_sid
+            logger.info(f"[setup] mapped conv_id={conv_id} call_sid={call_sid}")
+            # Resolve app config
+            if conv_id not in conv_app_map:
+                to_num = setup_msg.to_number or ""
+                app_cfg = _PHONE_TO_APP.get(to_num)
+                if app_cfg:
+                    conv_app_map[conv_id] = app_cfg.route_prefix
+                elif ALL_APPS:
+                    conv_app_map[conv_id] = next(iter(ALL_APPS))
+            # Map outbound conv_id if present
+            cp = setup_msg.custom_parameters
+            if cp is None:
+                extra = {}
+            elif isinstance(cp, dict):
+                extra = cp
+            else:
+                extra = cp.model_extra or {}
+            outbound_conv_id = extra.get("outboundConvId", "")
+            if outbound_conv_id and outbound_conv_id in pending_outbound_context:
+                pending_outbound_context[conv_id] = pending_outbound_context.pop(outbound_conv_id)
+                logger.info(f"[setup] mapped outboundConvId={outbound_conv_id} → {conv_id}")
+                if outbound_conv_id in conv_app_map:
+                    conv_app_map[conv_id] = conv_app_map.pop(outbound_conv_id)
+            # Map author info + populate outbound_conversation_map for escalation
+            from_num = setup_msg.from_number or ""
+            if from_num and conv_id in self._conversations:
+                self._conversations[conv_id].author_info = AuthorInfo(address=from_num)
+            existing_entry = outbound_conversation_map.get(conv_id)
+            if not existing_entry or not (existing_entry.get("profileId") if isinstance(existing_entry, dict) else existing_entry):
+                app_cfg = _app_for_conv(conv_id)
+                ctx = pending_outbound_context.get(conv_id)
+                member_phone_resolved = (ctx.get("phone", "") if ctx else "") or from_num
+                member_name_resolved = ctx.get("name", "") if ctx else ""
+                profile_id = ""
+                if app_cfg and member_phone_resolved:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        profile_id = await loop.run_in_executor(None, _lookup_profile_id, member_phone_resolved, app_cfg)
+                        if profile_id and not member_name_resolved:
+                            traits = await loop.run_in_executor(None, _fetch_profile_traits, profile_id, app_cfg)
+                            member_name_resolved = (f"{traits.get('firstName','')} {traits.get('lastName','')}".strip()
+                                                    or traits.get("name", ""))
+                    except Exception as _e:
+                        logger.warning(f"[setup] profile lookup failed: {_e}")
+                direction = "outbound" if ctx else "inbound"
+                outbound_conversation_map[conv_id] = {
+                    "phone": member_phone_resolved, "profileId": profile_id,
+                    "name": member_name_resolved, "direction": direction,
+                }
+                logger.info(f"[setup] outbound_conversation_map[{conv_id}] phone={member_phone_resolved} profileId={profile_id}")
+                # Store greeting in cache — already pushed to transcript at /twiml time
+                greeting_text = _greeting_by_phone.pop(member_phone_resolved, "") or (ctx.get("greeting", "") if ctx else "")
+                if greeting_text:
+                    greeting_cache[conv_id] = greeting_text
+        return conv_id, session_state
+
     def _handle_setup(self, message: SetupMessage) -> None:
+        logger.info(f"[setup] _handle_setup called conv_id={getattr(message.custom_parameters, 'conversation_id', '?')} to={message.to_number!r} from={message.from_number!r}")
         super()._handle_setup(message)
         conv_id = message.custom_parameters.conversation_id
 
@@ -1153,7 +1225,8 @@ class OwlVoiceChannel(VoiceChannel):
             )
 
 
-voice_channel = OwlVoiceChannel(tac=tac, auto_retrieve_memory=False)
+from tac.channels.voice import VoiceChannelConfig as _VoiceChannelConfig
+voice_channel = OwlVoiceChannel(tac=tac, config=_VoiceChannelConfig(memory_mode="never"))
 
 # ---------------------------------------------------------------------------
 # TAC callbacks
@@ -1168,6 +1241,12 @@ async def handle_message_ready(
     conv_id = context.conversation_id
     session_id = context.profile_id or conv_id
     cfg = _app_for_conv(conv_id)
+    if not cfg and ALL_APPS:
+        # New TAC SDK doesn't call _handle_setup — populate conv_app_map with fallback
+        cfg_fallback = next(iter(ALL_APPS.values()))
+        conv_app_map[conv_id] = cfg_fallback.route_prefix
+        cfg = cfg_fallback
+        logger.info(f"[handle_message_ready] auto-mapped conv_id={conv_id} → app={cfg.id}")
     if not cfg:
         logger.error(f"[handle_message_ready] no app config for conv_id={conv_id} — dropping")
         return
@@ -1175,8 +1254,25 @@ async def handle_message_ready(
 
     _map_entry = outbound_conversation_map.get(conv_id)
     _transcript_profile_id = _map_entry.get("profileId", "") if isinstance(_map_entry, dict) else ""
+    # If profileId missing but phone is available, look it up and update the map
+    if not _transcript_profile_id:
+        _phone = _map_entry.get("phone", "") if isinstance(_map_entry, dict) else (_map_entry if isinstance(_map_entry, str) else "")
+        if _phone and cfg:
+            try:
+                _transcript_profile_id = await asyncio.get_event_loop().run_in_executor(None, _lookup_profile_id, _phone, cfg)
+                if _transcript_profile_id and isinstance(_map_entry, dict):
+                    _map_entry["profileId"] = _transcript_profile_id
+                elif _transcript_profile_id:
+                    outbound_conversation_map[conv_id] = {"phone": _phone, "profileId": _transcript_profile_id, "name": ""}
+                logger.info(f"[{cfg.id}] transcript profile lookup phone={_phone} → profileId={_transcript_profile_id!r}")
+            except Exception as _e:
+                logger.warning(f"[{cfg.id}] transcript profile lookup failed: {_e}")
+    logger.info(f"[{cfg.id if cfg else '?'}] transcript profile_id={_transcript_profile_id!r}")
+    # Push member message now that profile_id is resolved
     if _transcript_profile_id and user_message:
         asyncio.create_task(_push_transcript_event(_transcript_profile_id, "member", user_message))
+    elif user_message:
+        logger.warning(f"[{cfg.id}] transcript skipped — no profile_id for conv_id={conv_id}")
 
     is_turn1 = conv_id not in system_prompt_cache
 
@@ -1219,6 +1315,8 @@ async def handle_message_ready(
             enriched = mem_ctx
         memory_context_cache[conv_id] = enriched
         logger.info(f"[{cfg.id}] memory context for agent (turn 1):\n{enriched or '(empty)'}")
+
+        # Greeting already pushed to transcript at /twiml time — no need to repeat here
     else:
         enriched = ""
 
@@ -1272,7 +1370,7 @@ async def handle_message_ready(
                             yield " Unfortunately I wasn't able to complete the transfer. Please try again."
                         else:
                             try:
-                                await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
+                                await tac.conversation_orchestrator_client.update_conversation(conv_id, status="CLOSED")
                                 logger.info(f"[{cfg.id}][escalation] CO conversation closed after handoff conv_id={conv_id}")
                             except Exception as _ce:
                                 logger.warning(f"[{cfg.id}][escalation] close CO conv failed: {_ce}")
@@ -1310,7 +1408,7 @@ async def handle_conversation_ended(context: ConversationSession) -> None:
     logger.info(f"[{cfg.id if cfg else '?'}] cleaned up conv_id={conv_id}")
 
     try:
-        await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
+        await tac.conversation_orchestrator_client.update_conversation(conv_id, status="CLOSED")
     except Exception as e:
         if "already" not in str(e).lower() and "400" not in str(e):
             logger.warning(f"[{cfg.id if cfg else '?'}] maestro close failed conv_id={conv_id}: {e}")
@@ -1388,12 +1486,12 @@ async def get_outbound_phone(conv_id: str) -> dict:
     # Fallback: look up participants via Conversations API (elevenlabs path)
     if conv_id.startswith("conv_conversation_"):
         cfg = next(iter(ALL_APPS.values())) if ALL_APPS else None
-        if cfg and cfg.memory_api_key:
+        if cfg and TWILIO_ACCOUNT_SID:
             try:
                 async with httpx.AsyncClient() as client:
                     res = await client.get(
                         f"https://conversations.twilio.com/v2/Conversations/{conv_id}/Participants",
-                        auth=(cfg.memory_api_key, cfg.memory_api_token),
+                        auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
                         timeout=5,
                     )
                     for p in res.json().get("participants", []):
@@ -1464,15 +1562,15 @@ async def browser_answer_twiml(request: Request) -> Response:
     our_number = first_cfg.phone_number if first_cfg else ""
     try:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        conversation = await tac.maestro_client.create_conversation(name=f"human-agent-call-{call_sid or ts}")
+        conversation = await tac.conversation_orchestrator_client.create_conversation(name=f"human-agent-call-{call_sid or ts}")
         conv_id = conversation.id
-        member_resp = await tac.maestro_client.add_participant(
+        member_resp = await tac.conversation_orchestrator_client.add_participant(
             conversation_id=conv_id,
             addresses=[ParticipantAddress(channel="VOICE", address=member_phone, channelId=call_sid)],
             participant_type="CUSTOMER",
         )
         resolved_profile_id = (member_resp.profile_id if member_resp else None) or profile_id
-        await tac.maestro_client.add_participant(
+        await tac.conversation_orchestrator_client.add_participant(
             conversation_id=conv_id,
             addresses=[ParticipantAddress(channel="VOICE", address=our_number, channelId=call_sid)],
             participant_type="AI_AGENT",
@@ -1494,7 +1592,7 @@ async def browser_call_status(request: Request) -> Response:
         conv_id = next((c for c, s in conversation_call_sid_map.items() if s == call_sid), None)
         if conv_id:
             try:
-                await tac.maestro_client.update_conversation(conv_id, status="CLOSED")
+                await tac.conversation_orchestrator_client.update_conversation(conv_id, status="CLOSED")
             except Exception as e:
                 logger.error(f"[browser-call] failed to close conversation: {e}")
     return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
@@ -1542,15 +1640,20 @@ async def twiml_shared(request: Request) -> Response:
     else:
         logger.info(f"[twiml] skipping lookup — from_phone empty or greeting already set")
 
+    if greeting and from_phone:
+        _greeting_by_phone[from_phone] = greeting
+    # Push greeting to transcript immediately if we resolved a profile_id above
+    if greeting and 'profile_id' in dir() and profile_id:
+        from datetime import datetime, timezone, timedelta
+        _greeting_ts = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+        asyncio.create_task(_push_transcript_event(profile_id, "agent", greeting, ts=_greeting_ts))
+        logger.info(f"[twiml] pushed greeting to transcript profileId={profile_id}")
+
     twiml = await voice_channel.handle_incoming_call(
-        to_number=form.get("To", ""),
-        from_number=from_phone,
         options={"websocket_url": ws_url, "action_url": callback_url,
                  "welcome_greeting": greeting},
-        call_sid=form.get("CallSid", ""),
     )
-    # Reduce interrupt sensitivity — inject interruptible="false" so agent isn't
-    # cut off by background noise. Member can still interrupt by speaking clearly.
+    # Allow member to interrupt the agent by speaking.
     twiml = twiml.replace("<ConversationRelay ", '<ConversationRelay interruptible="true" ', 1)
     return Response(content=twiml, media_type="application/xml")
 
@@ -1722,19 +1825,19 @@ async def conversations_webhook(request: Request) -> dict:
         logger.info(f"[{cfg.id}][chat] creating CO conversation for conv_sid={conv_sid}")
         try:
             from tac.models import ParticipantAddress
-            co_conv = await tac.maestro_client.create_conversation(
+            co_conv = await tac.conversation_orchestrator_client.create_conversation(
                 name=f"webchat-{visitor_phone}-{conv_sid[-8:]}"
             )
             co_conv_id = co_conv.id
             chat_classic_to_co[conv_sid] = co_conv_id
             chat_co_to_classic[co_conv_id] = conv_sid
 
-            await tac.maestro_client.add_participant(
+            await tac.conversation_orchestrator_client.add_participant(
                 conversation_id=co_conv_id,
                 addresses=[ParticipantAddress(channel="CHAT", address=visitor_phone, channelId=conv_sid)],
                 participant_type="CUSTOMER",
             )
-            await tac.maestro_client.add_participant(
+            await tac.conversation_orchestrator_client.add_participant(
                 conversation_id=co_conv_id,
                 addresses=[ParticipantAddress(channel="CHAT", address=cfg.phone_number or visitor_phone, channelId=conv_sid)],
                 participant_type="AI_AGENT",
@@ -1871,18 +1974,18 @@ async def chat_message(request: Request) -> dict:
         logger.info(f"[{cfg.id}][chat] creating CO conversation conv_sid={conv_sid}")
         try:
             from tac.models import ParticipantAddress
-            co_conv = await tac.maestro_client.create_conversation(
+            co_conv = await tac.conversation_orchestrator_client.create_conversation(
                 name=f"webchat-{visitor_phone}-{conv_sid[-8:]}"
             )
             co_conv_id = co_conv.id
             chat_classic_to_co[conv_sid] = co_conv_id
             chat_co_to_classic[co_conv_id] = conv_sid
-            await tac.maestro_client.add_participant(
+            await tac.conversation_orchestrator_client.add_participant(
                 conversation_id=co_conv_id,
                 addresses=[ParticipantAddress(channel="CHAT", address=visitor_phone, channelId=conv_sid)],
                 participant_type="CUSTOMER",
             )
-            await tac.maestro_client.add_participant(
+            await tac.conversation_orchestrator_client.add_participant(
                 conversation_id=co_conv_id,
                 addresses=[ParticipantAddress(channel="CHAT", address=cfg.phone_number or visitor_phone, channelId=conv_sid)],
                 participant_type="AI_AGENT",
@@ -2027,7 +2130,7 @@ async def chat_close(request: Request) -> dict:
         conv_app_map.pop(co_conv_id, None)
         outbound_conversation_map.pop(co_conv_id, None)
         try:
-            await tac.maestro_client.update_conversation(co_conv_id, status="CLOSED")
+            await tac.conversation_orchestrator_client.update_conversation(co_conv_id, status="CLOSED")
             logger.info(f"[chat] CO conversation closed co_conv_id={co_conv_id}")
         except Exception as e:
             logger.warning(f"[chat] close CO conv failed: {e}")

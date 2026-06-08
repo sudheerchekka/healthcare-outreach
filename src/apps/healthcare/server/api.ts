@@ -332,9 +332,9 @@ export async function startHealthcareAppServer(): Promise<void> {
 
   // ── Transcript: receive event from TAC server ────────────────────────────
   app.post('/transcript-event', async (req, reply) => {
-    const { profileId, role, text } = req.body as Record<string, string>;
+    const { profileId, role, text, ts: providedTs } = req.body as Record<string, string>;
     if (!profileId || !text) return reply.send({ success: false });
-    const msg = { role, text, ts: new Date().toISOString() };
+    const msg = { role, text, ts: providedTs || new Date().toISOString() };
     const msgs = transcriptMessages.get(profileId) ?? [];
     msgs.push(msg);
     transcriptMessages.set(profileId, msgs);
@@ -352,7 +352,8 @@ export async function startHealthcareAppServer(): Promise<void> {
     raw.setHeader('Connection', 'keep-alive');
     raw.setHeader('Access-Control-Allow-Origin', '*');
     raw.flushHeaders();
-    (transcriptMessages.get(profileId) ?? []).forEach(m => raw.write(`data: ${JSON.stringify(m)}\n\n`));
+    const cached = [...(transcriptMessages.get(profileId) ?? [])].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+    cached.forEach(m => raw.write(`data: ${JSON.stringify(m)}\n\n`));
     if (!transcriptSseClients.has(profileId)) transcriptSseClients.set(profileId, new Set());
     transcriptSseClients.get(profileId)!.add(raw);
     const ping = setInterval(() => raw.write(': ping\n\n'), 25000);

@@ -1,4 +1,3 @@
-twilio-agent-connect @ file:///app/vendor/twilio-agent-connect
 bedrock-agentcore>=1.0.3
 strands-agents
 fastapi
