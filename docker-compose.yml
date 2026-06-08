@@ -12,8 +12,8 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_REGION=${AWS_REGION:-us-east-1}
     volumes:
-      # Mount src/tac so system prompt edits are live without rebuild
-      - ./src/tac:/app/src/tac:ro
+      # Mount src/tac-old so system prompt edits are live without rebuild
+      - ./src/tac-old:/ap./src/tac-old:ro
     restart: unless-stopped
     logging:
       driver: json-file

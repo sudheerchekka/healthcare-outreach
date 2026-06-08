@@ -6,7 +6,7 @@
   "account_sid_env": "TWILIO_TAC_ACCOUNT_SID",
   "auth_token_env": "TWILIO_TAC_AUTH_TOKEN",
   "api_key_env": "TWILIO_API_KEY",
-  "api_token_env": "TWILIO_API_TOKEN",
+  "api_token_env": "TWILIO_API_SECRET",
   "phone_number_env": "PUBSEC_PHONE_NUMBER",
   "memory_store_env": "PUBSEC_MEMORY_STORE_ID",
   "outbound_call_to_env": "PUBSEC_OUTBOUND_CALL_TO",

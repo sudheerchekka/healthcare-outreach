@@ -1,0 +1,19 @@
+# TAC SDK source lives at src/tac/ — importable via PYTHONPATH=.. (no install needed)
+#
+# Setup:
+#   cd src/tac-hls-server
+#   uv venv .venv && source .venv/bin/activate
+#   uv pip install -r requirements.txt
+#
+# Run:
+#   PYTHONPATH=.. uvicorn server:app --port 8000 --reload
+openai>=2.0.0
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+httpx
+twilio
+python-multipart
+pydantic>=2.0.0
+structlog

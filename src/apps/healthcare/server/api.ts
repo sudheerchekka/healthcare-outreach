@@ -22,7 +22,7 @@ import {
 // ── Env ────────────────────────────────────────────────────────────────────
 const ACCOUNT_SID      = process.env.TWILIO_TAC_ACCOUNT_SID ?? '';
 const AUTH_TOKEN       = process.env.TWILIO_TAC_AUTH_TOKEN ?? '';
-const PHONE_NUMBER     = process.env.TWILIO_TAC_PHONE_NUMBER ?? '';
+const PHONE_NUMBER     = process.env.TWILIO_PHONE_NUMBER ?? '';
 const VOICE_DOMAIN     = (process.env.VOICE_PUBLIC_DOMAIN ?? 'NOT_SET').replace(/^https?:\/\//, '');
 const OUTBOUND_CALL_TO = process.env.OUTBOUND_CALL_TO ?? '';
 const CI_SUMMARY_OPERATOR_SID  = process.env.TWILIO_TAC_CI_SUMMARY_OPERATOR_SID ?? '';
@@ -368,7 +368,7 @@ export async function startHealthcareAppServer(): Promise<void> {
     try {
       const { AccessToken } = twilioJwt;
       const { VoiceGrant } = AccessToken;
-      const token = new AccessToken(ACCOUNT_SID, process.env.TWILIO_API_KEY ?? '', process.env.TWILIO_API_TOKEN ?? '', { identity: 'care-team-agent', ttl: 3600 });
+      const token = new AccessToken(ACCOUNT_SID, process.env.TWILIO_API_KEY ?? '', process.env.TWILIO_API_SECRET ?? '', { identity: 'care-team-agent', ttl: 3600 });
       token.addGrant(new VoiceGrant({ incomingAllow: true }));
       reply.send({ token: token.toJwt() });
     } catch (e) {
@@ -450,7 +450,7 @@ export async function startHealthcareAppServer(): Promise<void> {
 
   // ── Admin: system prompt ─────────────────────────────────────────────────
   const SYSTEM_PROMPT_FILE          = path.join(process.cwd(), 'src/apps/healthcare/agent/src/system_prompt.txt');
-  const SYSTEM_PROMPT_INBOUND_FILE  = path.join(process.cwd(), 'src/tac/system_prompt_inbound.txt');
+  const SYSTEM_PROMPT_INBOUND_FILE  = path.join(process.cwd(), 'src/tac-old/system_prompt_inbound.txt');
 
   async function readPromptFile(filePath: string): Promise<string> {
     try { return (await readFile(filePath, 'utf8')).trim(); } catch { return ''; }
@@ -579,7 +579,7 @@ export async function startHealthcareAppServer(): Promise<void> {
       if (!profileId) {
         const execDetails = result.executionDetails as Record<string, unknown> | undefined;
         const participants = (execDetails?.participants as { id: string; profileId?: string; type: string; address?: string }[]) ?? [];
-        const ourNumber = process.env.TWILIO_TAC_PHONE_NUMBER ?? '';
+        const ourNumber = process.env.TWILIO_PHONE_NUMBER ?? '';
         const member = participants.find(p => p.profileId && p.address !== ourNumber);
         if (member?.profileId) {
           profileId = member.profileId;

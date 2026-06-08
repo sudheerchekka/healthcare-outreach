@@ -10,8 +10,8 @@ WORKDIR /app
 
 # Python deps (vendor/ must be present before building — see README)
 COPY vendor/ ./vendor/
-COPY src/tac/requirements.txt ./src/tac/requirements.txt
-RUN pip install --no-cache-dir -r src/tac/requirements.txt
+COPY src/tac-old/requirements.txt ./src/tac-old/requirements.txt
+RUN pip install --no-cache-dir -r src/tac-old/requirements.txt
 
 # Node.js deps + TypeScript build
 COPY package*.json ./

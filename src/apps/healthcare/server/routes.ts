@@ -396,7 +396,7 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
 
   // ── Admin: system prompts ─────────────────────────────────────────────────
   const SYSTEM_PROMPT_FILE         = path.join(process.cwd(), `src/apps/${cfg.id}/agent/src/system_prompt.txt`);
-  const SYSTEM_PROMPT_INBOUND_FILE = path.join(process.cwd(), `src/tac/apps/${cfg.id}/system_prompt_inbound.txt`);
+  const SYSTEM_PROMPT_INBOUND_FILE = path.join(process.cwd(), `src/tac-old/apps/${cfg.id}/system_prompt_inbound.txt`);
 
   async function readPromptFile(filePath: string): Promise<string> {
     try { return (await readFile(filePath, 'utf8')).trim(); } catch { return ''; }

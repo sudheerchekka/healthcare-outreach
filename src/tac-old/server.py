@@ -71,8 +71,8 @@ PUBLIC_DOMAIN = (os.environ.get("VOICE_PUBLIC_DOMAIN") or "").lstrip("https://")
 TAC_PORT = int(os.environ.get("TAC_PORT", "8000"))
 APP_PORT = int(os.environ.get("APP_PORT", "8001"))
 
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_TAC_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_TAC_AUTH_TOKEN", "")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "")
 ESCALATION_ENABLED = os.environ.get("ESCALATION_ENABLED", "false").lower() in ("1", "true", "yes")
 FLEX_HANDOFF_APPLICATION_SID = os.environ.get("TWILIO_FLEX_HANDOFF_APPLICATION_SID", "")
 FLEX_WORKFLOW_SID = os.environ.get("TWILIO_FLEX_WORKFLOW_SID", "")
@@ -567,7 +567,7 @@ async def _escalate_call_to_flex(conv_id: str, reason: str, urgency: str, target
         logger.warning(f"[escalation] ESCALATION_ENABLED=false — set to true in .env and restart")
         return False
     if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-        logger.error(f"[escalation] missing TWILIO_TAC_ACCOUNT_SID or TWILIO_TAC_AUTH_TOKEN")
+        logger.error(f"[escalation] missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN")
         return False
     if not FLEX_HANDOFF_APPLICATION_SID:
         logger.error(f"[escalation] missing TWILIO_FLEX_HANDOFF_APPLICATION_SID")

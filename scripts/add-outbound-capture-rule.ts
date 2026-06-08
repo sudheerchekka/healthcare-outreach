@@ -18,14 +18,14 @@ import axios from 'axios';
 
 const API_KEY    = process.env.TWILIO_TAC_API_KEY ?? process.env.TWILIO_API_KEY ?? '';
 const API_TOKEN  = process.env.TWILIO_TAC_API_TOKEN ?? process.env.TWILIO_API_TOKEN ?? '';
-const CONV_CONFIG_ID = process.env.TWILIO_TAC_CONVERSATION_SERVICE_SID ?? process.env.TWILIO_TAC_CONVERSATION_CONFIGURATION_ID ?? '';
+const CONV_CONFIG_ID = process.env.TWILIO_CONVERSATION_CONFIGURATION_ID ?? process.env.TWILIO_CONVERSATION_CONFIGURATION_ID ?? '';
 const PHONE_NUMBER   = process.env.TWILIO_TAC_PHONE_NUMBER ?? '';
 const ORCH_BASE  = 'https://conversations.twilio.com/v2/ControlPlane';
 const auth = { username: API_KEY, password: API_TOKEN };
 
 async function main() {
   if (!API_KEY || !API_TOKEN || !CONV_CONFIG_ID || !PHONE_NUMBER) {
-    console.error('Missing required env vars: TWILIO_TAC_API_KEY, TWILIO_TAC_API_TOKEN, TWILIO_TAC_CONVERSATION_CONFIGURATION_ID, TWILIO_TAC_PHONE_NUMBER');
+    console.error('Missing required env vars: TWILIO_TAC_API_KEY, TWILIO_TAC_API_TOKEN, TWILIO_CONVERSATION_CONFIGURATION_ID, TWILIO_TAC_PHONE_NUMBER');
     process.exit(1);
   }
 

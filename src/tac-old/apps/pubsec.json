@@ -11,7 +11,7 @@
   "vertexai_agent_id_env": "PUBSEC_VERTEXAI_AGENT_ID",
   "memory_store_env": "PUBSEC_MEMORY_STORE_ID",
   "memory_api_key_env": "TWILIO_API_KEY",
-  "memory_api_token_env": "TWILIO_API_TOKEN",
+  "memory_api_token_env": "TWILIO_API_SECRET",
   "flex_queue": "pubsec",
   "flex_escalation_announcement": "Of course! Let me connect you with a specialist right away. Please hold for just a moment.",
   "inbound_greeting": "Hello! This is the Public Services outreach team. How can I assist you today?",

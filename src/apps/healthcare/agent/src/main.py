@@ -5,7 +5,7 @@ Deployed via: agentcore deploy (from this directory)
 Invoked by:   Python TAC server via presigned AgentCore WebSocket (primary path)
               or locally with agentcore invoke
 
-WebSocket protocol (used by src/tac/server.py):
+WebSocket protocol (used by src/tac-old/server.py):
   Receive: {"type": "prompt", "voicePrompt": "...", "systemPrompt": "...", "memoryContext": "..."}
            {"type": "interrupt", "utterance_until_interrupt": "..."}
   Send:    {"type": "text", "token": "...", "last": false}
