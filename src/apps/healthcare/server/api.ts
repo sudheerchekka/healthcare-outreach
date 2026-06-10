@@ -190,15 +190,34 @@ export async function startHealthcareAppServer(): Promise<void> {
     const { profile_id } = req.body as { profile_id: string };
     if (!profile_id) return reply.status(400).send({ success: false, error: 'profile_id required' });
     try {
+      // Reset outreach traits
       const profile = await fetchProfile(profile_id);
       const existingOutreach = (profile?.traits?.outreach ?? {}) as Record<string, unknown>;
       await updateProfileTraits(profile_id, 'outreach', {
-        ...existingOutreach,
-        lastCallSummary: '',
-        outreachResponses: '',
-        status: 'pending',
+        ...existingOutreach, lastCallSummary: '', outreachResponses: '', status: 'pending',
       });
-      console.log(`[reset-member] cleared call history for profileId=${profile_id}`);
+
+      // Delete all observations
+      const obsRes = await axios.get(
+        `${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profile_id}/Observations`,
+        { auth: memoryAuth }
+      );
+      const observations = obsRes.data?.observations ?? [];
+      await Promise.allSettled(observations.map((o: { id: string }) =>
+        axios.delete(`${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profile_id}/Observations/${o.id}`, { auth: memoryAuth })
+      ));
+
+      // Delete all conversation summaries
+      const sumRes = await axios.get(
+        `${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profile_id}/ConversationSummaries`,
+        { auth: memoryAuth }
+      );
+      const summaries = sumRes.data?.summaries ?? [];
+      await Promise.allSettled(summaries.map((s: { id: string }) =>
+        axios.delete(`${MEMORY_BASE}/v1/Stores/${MEMORY_STORE_ID}/Profiles/${profile_id}/ConversationSummaries/${s.id}`, { auth: memoryAuth })
+      ));
+
+      console.log(`[reset-member] profileId=${profile_id} reset: traits + ${observations.length} obs + ${summaries.length} summaries deleted`);
       reply.send({ success: true });
     } catch (e) {
       reply.status(500).send({ success: false, error: String(e) });
