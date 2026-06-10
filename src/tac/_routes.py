@@ -131,7 +131,9 @@ def register_app_routes(app, cfg, voice_channel, pending_outbound_context,
 
     @app.websocket(f"{px}/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
+        logger.info(f"[ws] WebSocket connected to {px}/ws")
         await voice_channel.handle_websocket(FastAPIWebSocketAdapter(websocket))
+        logger.info(f"[ws] WebSocket disconnected from {px}/ws")
 
     @app.post(f"{px}/conversation-relay-callback")
     async def cr_callback(request: Request) -> Response:

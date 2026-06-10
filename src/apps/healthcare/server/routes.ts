@@ -24,6 +24,7 @@ export interface AppRouteState {
   ciSseClients: Map<string, Set<import('http').ServerResponse>>;
   ciPendingTraits: Map<string, Record<string, unknown>>;
   ciFlushTimers: Map<string, ReturnType<typeof setTimeout>>;
+  ciFirstConvId: Map<string, string>;
   transcriptMessages: Map<string, { role: string; text: string; ts: string }[]>;
   transcriptSseClients: Map<string, Set<import('http').ServerResponse>>;
   chatSseClients: Map<string, Set<import('http').ServerResponse>>;
@@ -46,6 +47,7 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
   const twilioClient = cfg.accountSid ? new Twilio(cfg.accountSid, cfg.authToken) : null;
 
   // Per-app in-memory state
+  const ciFirstConvId   = new Map<string, string>();  // profileId → first conv_id with CI results
   const ciPendingTraits = new Map<string, Record<string, unknown>>();
   const ciFlushTimers   = new Map<string, ReturnType<typeof setTimeout>>();
   const ciLiveResults   = new Map<string, Record<string, { label: string; result: string; json?: unknown; ts: string }>>();
@@ -215,6 +217,10 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
   app.delete(`${px}/api/ci-results/:profileId`, async (req, reply) => {
     const { profileId } = req.params as { profileId: string };
     ciLiveResults.delete(profileId);
+    // Note: ciFirstConvId is intentionally NOT cleared here — the Flex plugin calls this
+    // when the agent accepts, but we need to keep the first conv_id to prevent the
+    // Flex conversation CI from overriding AI agent CI results.
+    // ciFirstConvId is only reset when a NEW call starts (browser-call API).
     reply.send({ success: true });
   });
 
@@ -286,7 +292,7 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     const dialTo = cfg.outboundCallTo || normalizePhone(phone);
     const memberPhone = normalizePhone(phone);
     if (!dialTo) return reply.status(400).send({ success: false, error: 'No destination number' });
-    if (profileId) ciLiveResults.delete(profileId);
+    if (profileId) { ciLiveResults.delete(profileId); ciFirstConvId.delete(profileId); }
     const answerParams = new URLSearchParams({ member_phone: memberPhone, profile_id: profileId, member_name: name });
     const answerUrl = `https://${cfg.voiceDomain}${tacPx}/browser-answer-twiml?${answerParams}`;
     const statusCallback = `https://${cfg.voiceDomain}${tacPx}/browser-call-status`;
@@ -611,7 +617,7 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
   // ── END per-app routes ────────────────────────────────────────────────────
 
   return {
-    cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, ciFlushTimers,
+    cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, ciFlushTimers, ciFirstConvId,
     transcriptMessages, transcriptSseClients, chatSseClients, formatTimestampPST, scheduleCIFlush, tacPort,
   };
 }
@@ -621,7 +627,7 @@ export async function handleCiWebhook(
   payload: Record<string, unknown>,
   state: AppRouteState,
 ): Promise<void> {
-  const { cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, scheduleCIFlush, formatTimestampPST } = state;
+  const { cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, scheduleCIFlush, formatTimestampPST, ciFirstConvId } = state;
   const data = (payload.data ?? payload) as Record<string, unknown>;
   const convId: string = (data.conversationId as string) ?? (payload.conversationId as string) ?? '';
   const operatorResults: unknown[] = (payload.operatorResults as unknown[]) ?? [];
@@ -644,6 +650,17 @@ export async function handleCiWebhook(
   }
 
   if (!profileId) profileId = await lookupProfileId(memberPhone, creds);
+
+  // Only process CI from the first conv_id for this profile — skip subsequent convs (e.g. Flex conv)
+  if (profileId) {
+    const firstConv = ciFirstConvId.get(profileId);
+    if (!firstConv) {
+      ciFirstConvId.set(profileId, convId);
+    } else if (firstConv !== convId) {
+      console.log(`[CI] skipping conv_id=${convId} for profileId=${profileId} — first conv was ${firstConv}`);
+      return;
+    }
+  }
 
   let summaryText = '';
   let outreachAnalysis = '';

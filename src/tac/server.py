@@ -70,6 +70,7 @@ twilio_client: Optional[TwilioClient] = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_
 
 # TAC (memory retrieval disabled; we fetch it ourselves)
 tac = TAC(config=TACConfig.from_env())
+logger.info(f"[startup] TAC orchestrator_enabled={tac.is_orchestrator_enabled()} conversation_orchestrator_client={tac.conversation_orchestrator_client is not None}")
 
 
 @dataclass
@@ -1079,7 +1080,9 @@ class OwlVoiceChannel(VoiceChannel):
 
     async def _initialize_conversation(self, call_sid: str, setup_msg, websocket):
         """Override to capture call_sid → conv_id mapping for Flex escalation."""
+        logger.info(f"[_initialize_conversation] called call_sid={call_sid}")
         conv_id, session_state = await super()._initialize_conversation(call_sid, setup_msg, websocket)
+        logger.info(f"[_initialize_conversation] conv_id={conv_id} call_sid={call_sid}")
         if conv_id and call_sid:
             conversation_call_sid_map[conv_id] = call_sid
             logger.info(f"[setup] mapped conv_id={conv_id} call_sid={call_sid}")
@@ -1240,6 +1243,8 @@ async def handle_message_ready(
     t0 = time.time()
     conv_id = context.conversation_id
     session_id = context.profile_id or conv_id
+    print(f"[handle_message_ready] conv_id={conv_id} in_outbound_map={conv_id in outbound_conversation_map} map_size={len(outbound_conversation_map)}", flush=True)
+    logger.info(f"[handle_message_ready] conv_id={conv_id} in_outbound_map={conv_id in outbound_conversation_map} map_size={len(outbound_conversation_map)}")
     cfg = _app_for_conv(conv_id)
     if not cfg and ALL_APPS:
         # New TAC SDK doesn't call _handle_setup — populate conv_app_map with fallback
@@ -1365,6 +1370,9 @@ async def handle_message_ready(
                         urgency = str(data.get("urgency", "normal"))
                         target_queue = str(data.get("targetQueue", cfg.flex_queue))
                         logger.info(f"[{cfg.id}][escalation] agent requested transfer conv_id={conv_id} reason={reason}")
+                        # Wait for ConversationRelay to finish speaking the acknowledgment
+                        delay = float(os.environ.get("ESCALATION_DELAY_SECONDS", "3"))
+                        await asyncio.sleep(delay)
                         escalated = await _escalate_call_to_flex(conv_id=conv_id, reason=reason, urgency=urgency, target_queue=target_queue)
                         if not escalated:
                             yield " Unfortunately I wasn't able to complete the transfer. Please try again."
@@ -1473,6 +1481,7 @@ for _app_cfg in ALL_APPS.values():
 async def get_outbound_phone(conv_id: str) -> dict:
     """Shared — Node.js CI webhook resolves member phone + profileId from any app."""
     entry = outbound_conversation_map.get(conv_id)
+    logger.info(f"[get-outbound-phone] conv_id={conv_id} found={entry is not None} map_keys={list(outbound_conversation_map.keys())[-5:] if outbound_conversation_map else []}")
     app_prefix = conv_app_map.get(conv_id, "")
     profile_id_from_entry = entry.get("profileId", "") if isinstance(entry, dict) else ""
     if not app_prefix and profile_id_from_entry:
@@ -1483,10 +1492,11 @@ async def get_outbound_phone(conv_id: str) -> dict:
         return {"phone": entry.get("phone", ""), "profileId": entry.get("profileId", ""), "appId": app_id}
     if isinstance(entry, str):
         return {"phone": entry, "profileId": "", "appId": app_id}
-    # Fallback: look up participants via Conversations API (elevenlabs path)
+    # Fallback: look up participants via Conversations API
+    # Skip if any participant has a Flex worker address (client: prefix) — those are Flex convs
     if conv_id.startswith("conv_conversation_"):
-        cfg = next(iter(ALL_APPS.values())) if ALL_APPS else None
-        if cfg and TWILIO_ACCOUNT_SID:
+        cfg_fallback = next(iter(ALL_APPS.values())) if ALL_APPS else None
+        if cfg_fallback and TWILIO_ACCOUNT_SID:
             try:
                 async with httpx.AsyncClient() as client:
                     res = await client.get(
@@ -1494,12 +1504,25 @@ async def get_outbound_phone(conv_id: str) -> dict:
                         auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
                         timeout=5,
                     )
-                    for p in res.json().get("participants", []):
+                    participants = res.json().get("participants", [])
+                    # Skip Flex conversations — they have client: worker addresses
+                    # Find member phone from CUSTOMER participant
+                    member_phone_found = ""
+                    for p in participants:
                         addresses = p.get("addresses") or []
                         address = addresses[0].get("address", "") if addresses else ""
-                        if address and address != cfg.phone_number and address.startswith("+"):
-                            outbound_conversation_map[conv_id] = address
-                            return {"phone": address, "profileId": ""}
+                        if address and address != cfg_fallback.phone_number and address.startswith("+"):
+                            member_phone_found = address
+                            break
+                    if not member_phone_found:
+                        return {"phone": "", "profileId": ""}
+                    # Check if this profile was recently escalated to Flex (30 min window)
+                    # If so, look up profileId and check escalation map
+                    profile_id_found = await asyncio.get_event_loop().run_in_executor(
+                        None, _lookup_profile_id, member_phone_found, cfg_fallback
+                    )
+                    outbound_conversation_map[conv_id] = member_phone_found
+                    return {"phone": member_phone_found, "profileId": profile_id_found or ""}
             except Exception as e:
                 logger.warning(f"[get-outbound-phone] API fallback failed: {e}")
     return {"phone": "", "profileId": ""}
