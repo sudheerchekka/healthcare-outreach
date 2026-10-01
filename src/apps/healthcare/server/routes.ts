@@ -17,6 +17,11 @@ import type { MemoryCreds } from './memory';
 
 const memoryAxios = axios.create();
 
+export interface NbrPair { userText: string; response: string; ts: string }
+
+export interface PendingAsk { profileId: string; question: string; askedAt: number }
+export interface AskReply { question: string; response: string; elapsedMs: number; ts: string }
+
 export interface AppRouteState {
   cfg: AppConfig;
   creds: MemoryCreds;
@@ -25,6 +30,10 @@ export interface AppRouteState {
   ciPendingTraits: Map<string, Record<string, unknown>>;
   ciFlushTimers: Map<string, ReturnType<typeof setTimeout>>;
   ciFirstConvId: Map<string, string>;
+  nbrResults: Map<string, NbrPair[]>;
+  pendingNbrAsks: Map<string, PendingAsk>; // convId → pending on-demand ask
+  askReplies: Map<string, AskReply[]>;     // profileId → history (for SSE replay on reconnect)
+  askSseClients: Map<string, Set<import('http').ServerResponse>>;
   transcriptMessages: Map<string, { role: string; text: string; ts: string }[]>;
   transcriptSseClients: Map<string, Set<import('http').ServerResponse>>;
   chatSseClients: Map<string, Set<import('http').ServerResponse>>;
@@ -52,6 +61,10 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
   const ciFlushTimers   = new Map<string, ReturnType<typeof setTimeout>>();
   const ciLiveResults   = new Map<string, Record<string, { label: string; result: string; json?: unknown; ts: string }>>();
   const ciSseClients    = new Map<string, Set<import('http').ServerResponse>>();
+  const nbrResults      = new Map<string, NbrPair[]>();
+  const pendingNbrAsks  = new Map<string, PendingAsk>();
+  const askReplies      = new Map<string, AskReply[]>();
+  const askSseClients   = new Map<string, Set<import('http').ServerResponse>>();
   const transcriptMessages    = new Map<string, { role: string; text: string; ts: string }[]>();
   const transcriptSseClients  = new Map<string, Set<import('http').ServerResponse>>();
   const chatSseClients        = new Map<string, Set<import('http').ServerResponse>>();
@@ -237,12 +250,17 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
   // ── CI live results ───────────────────────────────────────────────────────
   app.get(`${px}/api/ci-results/:profileId`, async (req, reply) => {
     const { profileId } = req.params as { profileId: string };
-    reply.send({ operators: cfg.ciOperators, results: ciLiveResults.get(profileId) ?? {} });
+    reply.send({
+      operators: cfg.ciOperators,
+      results: ciLiveResults.get(profileId) ?? {},
+      nbr: nbrResults.get(profileId) ?? [],
+    });
   });
 
   app.delete(`${px}/api/ci-results/:profileId`, async (req, reply) => {
     const { profileId } = req.params as { profileId: string };
     ciLiveResults.delete(profileId);
+    nbrResults.delete(profileId);
     // Note: ciFirstConvId is intentionally NOT cleared here — the Flex plugin calls this
     // when the agent accepts, but we need to keep the first conv_id to prevent the
     // Flex conversation CI from overriding AI agent CI results.
@@ -260,7 +278,8 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     raw.setHeader('Access-Control-Allow-Origin', '*');
     raw.flushHeaders();
     const cached = ciLiveResults.get(profileId) ?? {};
-    raw.write(`data: ${JSON.stringify({ operators: cfg.ciOperators, results: cached })}\n\n`);
+    const cachedNbr = nbrResults.get(profileId) ?? [];
+    raw.write(`data: ${JSON.stringify({ operators: cfg.ciOperators, results: cached, nbr: cachedNbr })}\n\n`);
     if (!ciSseClients.has(profileId)) ciSseClients.set(profileId, new Set());
     ciSseClients.get(profileId)!.add(raw);
     console.log(`[CI] SSE client connected profileId=${profileId} total=${ciSseClients.get(profileId)!.size}`);
@@ -318,7 +337,7 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     const dialTo = cfg.outboundCallTo || normalizePhone(phone);
     const memberPhone = normalizePhone(phone);
     if (!dialTo) return reply.status(400).send({ success: false, error: 'No destination number' });
-    if (profileId) { ciLiveResults.delete(profileId); ciFirstConvId.delete(profileId); }
+    if (profileId) { ciLiveResults.delete(profileId); nbrResults.delete(profileId); ciFirstConvId.delete(profileId); }
     const answerParams = new URLSearchParams({ member_phone: memberPhone, profile_id: profileId, member_name: name });
     const answerUrl = `https://${cfg.voiceDomain}${tacPx}/browser-answer-twiml?${answerParams}`;
     const statusCallback = `https://${cfg.voiceDomain}${tacPx}/browser-call-status`;
@@ -433,6 +452,202 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
   async function readPromptFile(filePath: string): Promise<string> {
     try { return (await readFile(filePath, 'utf8')).trim(); } catch { return ''; }
   }
+
+  // ── Ask (Twilio Knowledge Base search) ────────────────────────────────────
+  app.post(`${px}/api/ask`, async (req, reply) => {
+    const { question = '', top } = (req.body ?? {}) as { question?: string; top?: number };
+    if (!question.trim()) return reply.status(400).send({ error: 'question required' });
+    if (!cfg.knowledgeBaseId) return reply.status(500).send({ error: 'Knowledge base not configured (set HEALTHCARE_KB_ID in .env)' });
+
+    const effectiveTop = Math.max(1, Number.isFinite(top) ? Math.floor(top as number) : cfg.knowledgeTop);
+    const t0 = Date.now();
+    try {
+      const res = await axios.post(
+        `https://knowledge.twilio.com/v2/KnowledgeBases/${cfg.knowledgeBaseId}/Search`,
+        { query: question, top: effectiveTop },
+        { auth: { username: cfg.apiKey, password: cfg.apiToken }, timeout: 15000 },
+      );
+      const chunks = ((res.data?.chunks ?? []) as Array<Record<string, unknown>>)
+        .filter(c => c.content)
+        .map(c => ({
+          content: c.content as string,
+          score: (c.score as number) ?? null,
+          knowledgeId: (c.knowledgeId as string) ?? null,
+          documentTitle: (c.documentTitle as string) ?? null,
+          documentUrl: (c.documentUrl as string) ?? null,
+          documentNumber: (c.documentNumber as number) ?? null,
+          chunkIndex: (c.chunkIndex as number) ?? null,
+        }));
+
+      const elapsedMs = Date.now() - t0;
+      console.log(`[${cfg.id}][ask] q="${question.slice(0, 80)}" top=${effectiveTop} chunks=${chunks.length} ms=${elapsedMs}`);
+      reply.send({ chunks, elapsedMs, knowledgeBaseId: cfg.knowledgeBaseId });
+    } catch (e: unknown) {
+      const elapsedMs = Date.now() - t0;
+      const axErr = e as { response?: { status?: number; data?: unknown }; message?: string };
+      console.error(`[${cfg.id}][ask] FAILED status=${axErr.response?.status} ms=${elapsedMs} body=${JSON.stringify(axErr.response?.data)}`);
+      reply.status(502).send({ error: axErr.message ?? String(e), elapsedMs });
+    }
+  });
+
+  // ── Personalized Ask (on-demand NBR rule execution) ───────────────────────
+  // Reaps `pendingNbrAsks` entries older than 2 minutes so leaked promises can't
+  // mis-match a late webhook with a brand-new ask on the same convId.
+  const PENDING_ASK_TTL_MS = 120_000;
+  setInterval(() => {
+    const now = Date.now();
+    for (const [convId, p] of pendingNbrAsks) {
+      if (now - p.askedAt > PENDING_ASK_TTL_MS) pendingNbrAsks.delete(convId);
+    }
+  }, 60_000).unref?.();
+
+  app.post(`${px}/api/personalized-ask`, async (req, reply) => {
+    const { profileId = '', question = '', convId = '' } = (req.body ?? {}) as {
+      profileId?: string; question?: string; convId?: string;
+    };
+    if (!profileId || !question.trim()) return reply.status(400).send({ error: 'profileId and question required' });
+    if (!convId) {
+      return reply.status(400).send({
+        error: 'convId required. Place a call first (the browser captures the conversation ID when the call connects).',
+        convId: '',
+        intelligenceConfigurationId: cfg.intelligenceConfigurationId,
+        nbrRuleId: cfg.nbrRuleId,
+      });
+    }
+    if (!cfg.intelligenceConfigurationId || !cfg.nbrRuleId) {
+      return reply.status(500).send({ error: 'NBR not configured (set TWILIO_INTELLIGENCE_CONFIGURATION_ID and TWILIO_NBR_RULE_ID in .env)' });
+    }
+
+    pendingNbrAsks.set(convId, { profileId, question: question.trim(), askedAt: Date.now() });
+
+    // Resolve the member's phone from TAC — needed as the "author" address for the injected message
+    let memberPhone = '';
+    try {
+      const r = await fetch(`http://localhost:${tacPort}/get-outbound-phone/${encodeURIComponent(convId)}`);
+      const d = await r.json() as { phone?: string };
+      memberPhone = d.phone ?? '';
+    } catch (e) {
+      console.warn(`[${cfg.id}][personalized-ask] TAC phone lookup failed:`, e);
+    }
+
+    // Inject the typed question into the CO conversation so NBR has a live member message to react to.
+    // Authored as the CUSTOMER (member) so NBR recommends what the care-team agent should say back.
+    // Twilio requires: content.type="TEXT" (not "TRANSCRIPTION"), plus participantId on both author
+    // and recipients — so we look up participants first.
+    if (memberPhone) {
+      try {
+        const partsRes = await axios.get(
+          `https://conversations.twilio.com/v2/Conversations/${convId}/Participants`,
+          { auth: { username: cfg.apiKey, password: cfg.apiToken }, timeout: 10_000 },
+        );
+        const participants = (partsRes.data?.participants ?? []) as Array<{
+          id: string; type: string;
+          addresses?: Array<{ address: string; channel: string }>;
+        }>;
+        const customer  = participants.find(p => p.type === 'CUSTOMER');
+        const aiAgent   = participants.find(p => p.type === 'AI_AGENT');
+        if (!customer || !aiAgent) {
+          console.warn(`[${cfg.id}][personalized-ask] convId=${convId} missing CUSTOMER or AI_AGENT participant — skipping injection`);
+        } else {
+          const authorAddr    = customer.addresses?.[0]?.address ?? memberPhone;
+          const recipientAddr = aiAgent.addresses?.[0]?.address ?? cfg.phoneNumber;
+          await axios.post(
+            `https://conversations.twilio.com/v2/Conversations/${convId}/Communications`,
+            {
+              author:     { address: authorAddr,    channel: 'VOICE', participantId: customer.id },
+              content:    { text: question.trim(), type: 'TEXT' },
+              recipients: [{ address: recipientAddr, channel: 'VOICE', participantId: aiAgent.id }],
+            },
+            { auth: { username: cfg.apiKey, password: cfg.apiToken }, timeout: 10_000 },
+          );
+          console.log(`[${cfg.id}][personalized-ask] injected question into convId=${convId} (author=${customer.id} recipient=${aiAgent.id})`);
+        }
+      } catch (e: unknown) {
+        const ax = e as { response?: { status?: number; data?: unknown } };
+        console.warn(`[${cfg.id}][personalized-ask] question injection failed status=${ax.response?.status} body=${JSON.stringify(ax.response?.data)} — proceeding to rule execution anyway`);
+      }
+    } else {
+      console.warn(`[${cfg.id}][personalized-ask] no memberPhone for convId=${convId} — skipping question injection (NBR may fail with empty transcript)`);
+    }
+
+    try {
+      const res = await axios.post(
+        'https://intelligence.twilio.com/v3/RuleExecutions',
+        {
+          intelligenceConfigurationId: cfg.intelligenceConfigurationId,
+          ruleId: cfg.nbrRuleId,
+          conversationId: convId,
+        },
+        { auth: { username: cfg.apiKey, password: cfg.apiToken }, timeout: 10_000 },
+      );
+      const executionSid: string = res.data?.id ?? res.data?.sid ?? '';
+      console.log(`[${cfg.id}][personalized-ask] profileId=${profileId} convId=${convId} executionSid=${executionSid} status=${res.status}`);
+      reply.status(202).send({
+        executionSid,
+        convId,
+        intelligenceConfigurationId: cfg.intelligenceConfigurationId,
+        nbrRuleId: cfg.nbrRuleId,
+      });
+    } catch (e: unknown) {
+      pendingNbrAsks.delete(convId);
+      const axErr = e as { response?: { status?: number; data?: unknown }; message?: string };
+      console.error(`[${cfg.id}][personalized-ask] rule exec FAILED status=${axErr.response?.status} body=${JSON.stringify(axErr.response?.data)}`);
+      reply.status(502).send({
+        error: axErr.message ?? String(e),
+        twilioStatus: axErr.response?.status,
+        twilioBody: axErr.response?.data,
+        convId,
+        intelligenceConfigurationId: cfg.intelligenceConfigurationId,
+        nbrRuleId: cfg.nbrRuleId,
+      });
+    }
+  });
+
+  app.get(`${px}/api/personalized-ask/config`, async (_req, reply) => {
+    reply.send({
+      intelligenceConfigurationId: cfg.intelligenceConfigurationId,
+      nbrRuleId: cfg.nbrRuleId,
+    });
+  });
+
+  app.get(`${px}/api/personalized-ask/:profileId/active-conv`, async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    try {
+      const r = await fetch(`http://localhost:${tacPort}/get-latest-conv/${encodeURIComponent(profileId)}`);
+      const d = await r.json() as { convId?: string };
+      console.log(`[${cfg.id}][active-conv] profileId=${profileId} → convId=${d.convId || '(empty)'}`);
+      reply.send({ convId: d.convId ?? '' });
+    } catch (e) {
+      console.error(`[${cfg.id}][active-conv] lookup failed profileId=${profileId}:`, e);
+      reply.status(502).send({ convId: '', error: String(e) });
+    }
+  });
+
+  app.get(`${px}/api/personalized-ask/:profileId/stream`, async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    reply.hijack();
+    const raw = reply.raw;
+    raw.setHeader('Content-Type', 'text/event-stream');
+    raw.setHeader('Cache-Control', 'no-cache');
+    raw.setHeader('Connection', 'keep-alive');
+    raw.setHeader('Access-Control-Allow-Origin', '*');
+    raw.flushHeaders();
+    // Replay cached history so a tab reconnect shows prior Q&As.
+    (askReplies.get(profileId) ?? []).forEach(r => raw.write(`data: ${JSON.stringify(r)}\n\n`));
+    if (!askSseClients.has(profileId)) askSseClients.set(profileId, new Set());
+    askSseClients.get(profileId)!.add(raw);
+    const ping = setInterval(() => raw.write(': ping\n\n'), 25000);
+    req.raw.on('close', () => {
+      clearInterval(ping);
+      askSseClients.get(profileId)?.delete(raw);
+    });
+  });
+
+  app.delete(`${px}/api/personalized-ask/:profileId`, async (req, reply) => {
+    const { profileId } = req.params as { profileId: string };
+    askReplies.delete(profileId);
+    reply.send({ success: true });
+  });
 
   app.get(`${px}/api/admin/system-prompt`, async (_req, reply) => {
     reply.send({ prompt: await readPromptFile(SYSTEM_PROMPT_FILE) });
@@ -643,7 +858,8 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
   // ── END per-app routes ────────────────────────────────────────────────────
 
   return {
-    cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, ciFlushTimers, ciFirstConvId,
+    cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, ciFlushTimers, ciFirstConvId, nbrResults,
+    pendingNbrAsks, askReplies, askSseClients,
     transcriptMessages, transcriptSseClients, chatSseClients, formatTimestampPST, scheduleCIFlush, tacPort,
   };
 }
@@ -653,7 +869,7 @@ export async function handleCiWebhook(
   payload: Record<string, unknown>,
   state: AppRouteState,
 ): Promise<void> {
-  const { cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, scheduleCIFlush, formatTimestampPST, ciFirstConvId } = state;
+  const { cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, scheduleCIFlush, formatTimestampPST, ciFirstConvId, nbrResults, transcriptMessages, pendingNbrAsks, askReplies, askSseClients } = state;
   const data = (payload.data ?? payload) as Record<string, unknown>;
   const convId: string = (data.conversationId as string) ?? (payload.conversationId as string) ?? '';
   const operatorResults: unknown[] = (payload.operatorResults as unknown[]) ?? [];
@@ -668,17 +884,25 @@ export async function handleCiWebhook(
     if (tacData.profileId) profileId = tacData.profileId;
   } catch { /* ignore */ }
 
+  // Personalized-Ask fast path: if we triggered an on-demand NBR execution for this convId,
+  // use the pending entry's profileId instead of requiring a TAC outbound record.
+  const pendingAsk = pendingNbrAsks.get(convId);
+  if (pendingAsk) {
+    profileId = pendingAsk.profileId;
+  }
+
   // Only process CI results from AI agent conversations — those tracked by TAC
   // If TAC has no phone record for this convId, it's a Flex/human agent conversation
-  if (!memberPhone) {
+  if (!memberPhone && !pendingAsk) {
     console.log(`[CI] skipping conv_id=${convId} — no TAC record (likely human agent conversation)`);
     return;
   }
 
-  if (!profileId) profileId = await lookupProfileId(memberPhone, creds);
+  if (!profileId && memberPhone) profileId = await lookupProfileId(memberPhone, creds);
 
-  // Only process CI from the first conv_id for this profile — skip subsequent convs (e.g. Flex conv)
-  if (profileId) {
+  // Only process CI from the first conv_id for this profile — skip subsequent convs (e.g. Flex conv).
+  // On-demand Personalized Ask runs may target an older conv_id and must bypass this filter.
+  if (profileId && !pendingAsk) {
     const firstConv = ciFirstConvId.get(profileId);
     if (!firstConv) {
       ciFirstConvId.set(profileId, convId);
@@ -737,10 +961,95 @@ export async function handleCiWebhook(
       const existing = ciLiveResults.get(profileId) ?? {};
       existing[operatorId] = { label: liveOp.label, result: liveText, json: liveJson, ts: formatTimestampPST() };
       ciLiveResults.set(profileId, existing);
-      const event = JSON.stringify({ operators: cfg.ciOperators, results: existing });
+      const event = JSON.stringify({ operators: cfg.ciOperators, results: existing, nbr: nbrResults.get(profileId) ?? [] });
       const sseClients = ciSseClients.get(profileId);
       console.log(`[CI] SSE push profileId=${profileId} operatorId=${operatorId} label=${liveOp.label} clients=${sseClients?.size ?? 0}`);
       sseClients?.forEach(client => client.write(`data: ${event}\n\n`));
+    }
+
+    // ── Next Best Response operator ─────────────────────────────────────────
+    if (cfg.ciNbrOperatorSid && operatorId === cfg.ciNbrOperatorSid && profileId && resultField) {
+      console.log(`[CI][NBR] matched operatorId=${operatorId} resultField=${JSON.stringify(resultField).slice(0, 400)}`);
+
+      // Collect candidate objects: resultField, plus any parsed `payload` wrapper
+      const candidates: Record<string, unknown>[] = [resultField];
+      const p = resultField.payload
+        ?? (resultField['com.twilio.cai.intelligence.JSONResult'] as Record<string, unknown> | undefined)?.payload;
+      if (typeof p === 'string') {
+        try { candidates.push(JSON.parse(p) as Record<string, unknown>); }
+        catch (e) { console.warn(`[CI][NBR] payload JSON parse failed: ${e}`); }
+      } else if (typeof p === 'object' && p !== null) {
+        candidates.push(p as Record<string, unknown>);
+      }
+
+      // Find an array of pairs if present
+      let rawItems: unknown[] = [];
+      for (const c of candidates) {
+        const arr = (c.interactions as unknown[]) ?? (c.pairs as unknown[]) ?? (c.responses as unknown[]);
+        if (Array.isArray(arr) && arr.length > 0) { rawItems = arr; break; }
+      }
+
+      const nowTs = formatTimestampPST();
+      const items: NbrPair[] = [];
+      for (const it of rawItems as Record<string, unknown>[]) {
+        const userText = String(
+          it.userText ?? it.user_text ?? it.user ?? it.member ?? it.memberText ?? it.question ?? it.utterance ?? ''
+        ).trim();
+        const response = String(
+          it.response ?? it.nextBestResponse ?? it.next_best_response ?? it.answer ?? it.suggestion ?? it.recommendation ?? ''
+        ).trim();
+        if (userText || response) items.push({ userText, response, ts: nowTs });
+      }
+
+      // Single-response fallback: operator emits `{response: "..."}` directly
+      if (items.length === 0) {
+        let single = '';
+        for (const c of candidates) {
+          single = String(
+            c.response ?? c.nextBestResponse ?? c.next_best_response
+            ?? c.answer ?? c.suggestion ?? c.recommendation ?? c.result ?? c.text ?? ''
+          ).trim();
+          if (single) break;
+        }
+        if (single) {
+          const msgs = transcriptMessages.get(profileId) ?? [];
+          const lastMember = [...msgs].reverse().find(m => m.role === 'member');
+          items.push({ userText: lastMember?.text ?? '', response: single, ts: nowTs });
+        }
+      }
+
+      if (items.length > 0) {
+        // Personalized Ask fast path: this NBR result was triggered by a pending on-demand ask.
+        // Push to the Ask SSE stream with the question we captured at trigger time.
+        if (pendingAsk) {
+          pendingNbrAsks.delete(convId);
+          const bestResponse = items.map(it => it.response).find(r => !!r) ?? '';
+          const askReply: AskReply = {
+            question: pendingAsk.question,
+            response: bestResponse,
+            elapsedMs: Date.now() - pendingAsk.askedAt,
+            ts: nowTs,
+          };
+          const history = askReplies.get(profileId) ?? [];
+          history.push(askReply);
+          askReplies.set(profileId, history);
+          const askEvent = JSON.stringify(askReply);
+          const askClients = askSseClients.get(profileId);
+          console.log(`[CI][personalized-ask] fulfilled profileId=${profileId} convId=${convId} elapsed=${askReply.elapsedMs}ms clients=${askClients?.size ?? 0}`);
+          askClients?.forEach(c => c.write(`data: ${askEvent}\n\n`));
+          // Skip the normal Operator Results store/push for on-demand runs — they aren't
+          // part of the live-call narrative, just a per-ask answer.
+        } else {
+          const existingNbr = nbrResults.get(profileId) ?? [];
+          existingNbr.push(...items);
+          nbrResults.set(profileId, existingNbr);
+          console.log(`[CI][NBR] stored profileId=${profileId} +${items.length} total=${existingNbr.length}`);
+          const nbrEvent = JSON.stringify({ operators: cfg.ciOperators, results: ciLiveResults.get(profileId) ?? {}, nbr: existingNbr });
+          ciSseClients.get(profileId)?.forEach(client => client.write(`data: ${nbrEvent}\n\n`));
+        }
+      } else {
+        console.log(`[CI][NBR] no pairs extracted — resultField keys=${Object.keys(resultField).join(',')}`);
+      }
     }
 
     if (isSummaryOp && !summaryText) {
@@ -775,6 +1084,8 @@ export async function handleCiWebhook(
 
   console.log(`[CI] extracted summaryText=${summaryText.slice(0,200) || '(empty)'} outreachAnalysis=${outreachAnalysis ? '(set)' : '(empty)'} profileId=${profileId ?? '(none)'}`);
   if (!profileId || (!summaryText && !outreachAnalysis)) return;
+  // On-demand Personalized Ask runs shouldn't write Summary/Outreach back into the member profile.
+  if (pendingAsk) return;
 
   const execDetails = (operatorResults[0] as Record<string,unknown> | undefined)?.executionDetails as Record<string,unknown> | undefined;
   const channels = (execDetails?.channels as string[] | undefined) ?? [];

@@ -269,6 +269,16 @@
     .admin-save { margin-top: 12px; background: var(--primary); color: #fff; border: none; border-radius: 7px; padding: 9px 22px; font-size: 13px; font-weight: 600; cursor: pointer; }
     .admin-save:hover { background: #c81a2f; }
     .admin-save:disabled { opacity: .5; cursor: not-allowed; }
+    .ask-chunk { background: var(--white); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(13,18,43,.04); }
+    .ask-chunk-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .ask-chunk-idx { font-size: 11px; font-weight: 700; color: var(--primary); background: var(--primary-light); padding: 2px 8px; border-radius: 10px; }
+    .ask-chunk-score { font-size: 11px; color: var(--text-muted); }
+    .ask-chunk-body { font-size: 13px; color: var(--text); line-height: 1.6; white-space: pre-wrap; }
+    .ask-chunk-source { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); font-size: 12px; color: var(--text-muted); }
+    .ask-chunk-source a { color: var(--primary); text-decoration: none; }
+    .ask-chunk-source a:hover { text-decoration: underline; }
+    .ask-error { padding: 12px 16px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; border-radius: 8px; font-size: 13px; }
+    .ask-empty { padding: 12px 16px; color: var(--text-muted); font-size: 13px; font-style: italic; }
 
     /* ── SMS Modal ──────────────────────────────────────────────── */
     .modal-overlay {
@@ -370,6 +380,7 @@
   <div class="page-tab" onclick="window.open('website.html', '_blank')">Home</div>
   <div class="page-tab active" id="tabMembers" onclick="switchPageTab('members')">Members</div>
   <div class="page-tab" id="tabAdmin" onclick="switchPageTab('admin')">Config</div>
+  <div class="page-tab" id="tabAsk" onclick="switchPageTab('ask')">Ask</div>
   <div class="page-tab" onclick="window.open('agent.html', '_blank')">Agent</div>
   <div class="page-tab" onclick="window.open('admin-members.html', '_blank', 'width=1400,height=900')">Admin</div>
 </div>
@@ -387,6 +398,20 @@
     <label for="promptInboundTextarea">System Prompt</label>
     <textarea id="promptInboundTextarea" placeholder="Loading…"></textarea>
     <button class="admin-save" id="btnSaveInboundPrompt" onclick="saveInboundPrompt()">Save</button>
+  </div>
+</div>
+
+<div id="panelAsk" style="display:none">
+  <div class="admin-panel">
+    <h2>Ask the Knowledge Base</h2>
+    <p class="admin-sub">Ask a question and get a response from the Twilio Knowledge Base. Configure the KB id with <code>HEALTHCARE_KB_ID</code> in <code>.env</code>.</p>
+    <label for="askQuestion">Question</label>
+    <textarea id="askQuestion" placeholder="e.g. What is covered under the OTC card?" style="min-height:80px"></textarea>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:12px">
+      <button class="admin-save" id="btnAskSubmit" onclick="askSubmit()">Ask</button>
+      <span id="askStatus" style="font-size:13px;color:var(--text-muted)"></span>
+    </div>
+    <div id="askResults" style="margin-top:20px"></div>
   </div>
 </div>
 
@@ -810,9 +835,70 @@
   function switchPageTab(name) {
     document.getElementById('panelMembers').style.display = name === 'members' ? '' : 'none';
     document.getElementById('panelAdmin').style.display   = name === 'admin'   ? '' : 'none';
+    document.getElementById('panelAsk').style.display     = name === 'ask'     ? '' : 'none';
     document.getElementById('tabMembers').classList.toggle('active', name === 'members');
     document.getElementById('tabAdmin').classList.toggle('active', name === 'admin');
+    document.getElementById('tabAsk').classList.toggle('active', name === 'ask');
     if (name === 'admin') loadPrompt();
+  }
+
+  /* ── Ask (Twilio Knowledge Base) ─────────────────────────────── */
+  async function askSubmit() {
+    const q = document.getElementById('askQuestion').value.trim();
+    if (!q) return;
+    const btn    = document.getElementById('btnAskSubmit');
+    const status = document.getElementById('askStatus');
+    const out    = document.getElementById('askResults');
+    btn.disabled = true; btn.textContent = 'Asking…';
+    status.textContent = ''; out.innerHTML = '';
+    const t0 = performance.now();
+    try {
+      const res  = await fetch('api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q }),
+      });
+      const data = await res.json();
+      const clientMs = Math.round(performance.now() - t0);
+      if (!res.ok) {
+        status.textContent = `Error (${clientMs} ms)`;
+        out.innerHTML = `<div class="ask-error">${escapeHtml(data.error || 'Request failed')}</div>`;
+        return;
+      }
+      const serverMs = data.elapsedMs ?? clientMs;
+      status.innerHTML = `Server: <strong>${serverMs} ms</strong> &nbsp;·&nbsp; Round-trip: <strong>${clientMs} ms</strong>`;
+      const chunks = data.chunks || [];
+      if (!chunks.length) {
+        out.innerHTML = '<div class="ask-empty">No relevant content found in the knowledge base.</div>';
+        return;
+      }
+      out.innerHTML = chunks.map((c, i) => {
+        const title = c.documentTitle || c.knowledgeId || '';
+        const url   = c.documentUrl || '';
+        const pageSuffix = c.documentNumber != null ? ` · p. ${c.documentNumber}` : '';
+        const sourceHtml = title
+          ? `<div class="ask-chunk-source">Source: ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(title)}</a>` : escapeHtml(title)}${escapeHtml(pageSuffix)}</div>`
+          : '';
+        return `
+          <div class="ask-chunk">
+            <div class="ask-chunk-head">
+              <span class="ask-chunk-idx">#${i + 1}</span>
+              ${c.score != null ? `<span class="ask-chunk-score">score ${Number(c.score).toFixed(3)}</span>` : ''}
+            </div>
+            <div class="ask-chunk-body">${escapeHtml(c.content)}</div>
+            ${sourceHtml}
+          </div>`;
+      }).join('');
+    } catch (e) {
+      status.textContent = `Error (${Math.round(performance.now() - t0)} ms)`;
+      out.innerHTML = `<div class="ask-error">${escapeHtml(String(e))}</div>`;
+    } finally {
+      btn.disabled = false; btn.textContent = 'Ask';
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   }
 
   async function loadPrompt() {

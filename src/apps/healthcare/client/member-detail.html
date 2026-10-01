@@ -203,6 +203,90 @@
     .msg-member      { background: #007AFF; color: #fff; border-bottom-left-radius: 4px; }
     .msg-agent       { background: var(--dark-light); color: var(--dark); border-bottom-right-radius: 4px; }
 
+    /* ── Next Best Response ── */
+    .nbr-item {
+      padding: 12px 14px; margin-bottom: 10px;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    }
+    .nbr-item:last-child { margin-bottom: 0; }
+    .nbr-user, .nbr-response { margin-bottom: 8px; }
+    .nbr-response:last-child, .nbr-user:last-of-type:only-child { margin-bottom: 0; }
+    .nbr-label {
+      display: inline-block; font-size: 10px; font-weight: 700;
+      color: var(--text-muted); text-transform: uppercase; letter-spacing: .6px;
+      margin-bottom: 4px;
+    }
+    .nbr-user .nbr-text {
+      font-size: 13px; color: var(--text); line-height: 1.5;
+      padding: 8px 12px; background: var(--white); border-left: 3px solid #007AFF;
+      border-radius: 4px;
+    }
+    .nbr-response .nbr-text {
+      font-size: 13px; color: var(--dark); line-height: 1.5;
+      padding: 8px 12px; background: var(--primary-light); border-left: 3px solid var(--primary);
+      border-radius: 4px; font-weight: 500;
+    }
+    .nbr-ts { font-size: 10px; color: var(--text-muted); margin-top: 4px; text-align: right; }
+
+    /* ── Personalized Ask ── */
+    .pask-head { margin-bottom: 10px; }
+    .pask-textarea {
+      width: 100%; min-height: 80px; padding: 10px 12px;
+      border: 1px solid var(--border); border-radius: 8px;
+      font-family: inherit; font-size: 13px; resize: vertical;
+    }
+    .pask-textarea:focus { border-color: var(--primary); outline: none; }
+    .pask-controls { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+    .pask-item {
+      padding: 14px 16px; margin-bottom: 12px;
+      background: var(--white); border: 1px solid var(--border); border-radius: 10px;
+      box-shadow: 0 1px 2px rgba(13,18,43,.04);
+    }
+    .pask-item-q {
+      font-size: 13px; color: var(--text); line-height: 1.5;
+      padding: 8px 12px; background: var(--bg); border-left: 3px solid #007AFF;
+      border-radius: 4px; margin-bottom: 10px;
+    }
+    .pask-item-a {
+      font-size: 13px; color: var(--dark); line-height: 1.6;
+      padding: 10px 12px; background: var(--primary-light); border-left: 3px solid var(--primary);
+      border-radius: 4px; white-space: pre-wrap;
+    }
+    .pask-item-meta { font-size: 11px; color: var(--text-muted); margin-top: 8px; text-align: right; }
+    .pask-error {
+      padding: 10px 14px; margin-top: 12px;
+      background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; border-radius: 8px;
+      font-size: 13px;
+    }
+    .pask-active-conv {
+      display: flex; align-items: center; gap: 8px;
+      margin: 10px 0 14px; padding: 8px 12px;
+      background: #f8f8fc; border: 1px solid var(--border); border-radius: 6px;
+      font-size: 12px; color: var(--text-muted);
+    }
+    .pask-active-dot { width: 8px; height: 8px; border-radius: 50%; background: #cbd5e1; flex-shrink: 0; }
+    .pask-active-dot.live { background: #16a34a; box-shadow: 0 0 0 3px rgba(22,163,74,.18); }
+    .pask-active-dot.empty { background: #cbd5e1; }
+    .pask-active-label { font-weight: 600; color: var(--text); }
+    .pask-active-conv code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--primary);
+      word-break: break-all; flex: 1;
+    }
+    .pask-refresh {
+      background: none; border: 1px solid var(--border); border-radius: 4px;
+      padding: 2px 8px; font-size: 12px; cursor: pointer; color: var(--text-muted);
+    }
+    .pask-refresh:hover { background: var(--white); color: var(--primary); border-color: var(--primary); }
+    .pask-debug {
+      margin-top: 14px; padding: 10px 12px;
+      background: #f8f8fc; border: 1px dashed var(--border); border-radius: 6px;
+      font-size: 11px; color: var(--text-muted);
+    }
+    .pask-debug > div { display: flex; gap: 10px; margin-bottom: 4px; }
+    .pask-debug > div:last-child { margin-bottom: 0; }
+    .pask-debug-k { min-width: 150px; font-weight: 600; color: var(--text); }
+    .pask-debug code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--primary); word-break: break-all; }
+
     /* ── Traits section ─────────────────────────────────────────── */
     .traits-section { margin-top: 32px; }
     .traits-section h3 { font-size: 15px; font-weight: 700; margin: 0 0 12px; }
@@ -309,6 +393,7 @@
     <div class="tab" onclick="switchTab('traits', this)">Traits</div>
     <div class="tab" onclick="switchTab('live', this)">Operator Results</div>
     <div class="tab" onclick="switchTab('transcript', this)">Transcript</div>
+    <div class="tab" onclick="switchTab('ask', this)">Personalized Ask</div>
   </div>
 
   <!-- Tab: Memory (observations + summaries) -->
@@ -362,6 +447,15 @@
     <div class="live-grid" id="liveGrid">
       <div class="live-card"><div class="live-card-empty">No operators configured — add CI_OPERATOR_*_SID to .env</div></div>
     </div>
+
+    <div class="section" style="margin-top:24px" id="nbrSection">
+      <div class="section-header">
+        <div class="section-title">Next Best Response <span class="count-badge" id="nbrCount">0</span></div>
+      </div>
+      <div class="card" style="padding:16px">
+        <div id="nbrList"><div class="live-card-empty" style="padding:8px">Waiting for next-best-response result…</div></div>
+      </div>
+    </div>
   </div>
 
   <!-- Tab: Transcript -->
@@ -374,6 +468,34 @@
       <button class="btn-refresh" onclick="clearTranscript()" style="font-size:12px;padding:5px 12px">Clear</button>
     </div>
     <div id="transcriptThread"></div>
+  </div>
+
+  <!-- Tab: Personalized Ask (on-demand NBR against this member's latest conversation) -->
+  <div id="tab-ask" class="tab-panel">
+    <div class="pask-head">
+      <div style="font-size:12px;color:var(--text-muted);line-height:1.5">
+        Ask a question — the Next Best Response operator will answer using this member's
+        Customer Memory, Knowledge Base content, and most recent conversation.
+      </div>
+    </div>
+    <div class="pask-active-conv" id="paskActiveConv">
+      <span class="pask-active-dot" id="paskActiveDot"></span>
+      <span class="pask-active-label">Active conversation:</span>
+      <code id="paskActiveId">checking…</code>
+      <button class="pask-refresh" onclick="refreshActiveConv()" title="Re-check">↻</button>
+    </div>
+    <textarea id="paskQuestion" class="pask-textarea" placeholder="e.g. How should I follow up on their last concern?"></textarea>
+    <div class="pask-controls">
+      <button class="btn btn-call" id="btnPaskSubmit" onclick="paskSubmit()">Ask</button>
+      <span id="paskStatus" style="font-size:12px;color:var(--text-muted)"></span>
+    </div>
+    <div id="paskDebug" class="pask-debug">
+      <div><span class="pask-debug-k">Conversation ID</span><code id="paskDbgConv">—</code></div>
+      <div><span class="pask-debug-k">Intelligence Config ID</span><code id="paskDbgCfg">—</code></div>
+      <div><span class="pask-debug-k">NBR Rule ID</span><code id="paskDbgRule">—</code></div>
+      <div><span class="pask-debug-k">Execution SID</span><code id="paskDbgExec">—</code></div>
+    </div>
+    <div id="paskHistory" style="margin-top:18px"></div>
   </div>
 </main>
 
@@ -544,6 +666,161 @@
     el.classList.add('active');
     document.getElementById(`tab-${name}`).classList.add('active');
     if (name === 'traits') loadTraits();
+    if (name === 'ask') {
+      startPaskSSE();
+      loadPaskConfigIds();   // fills Intelligence Config ID + NBR Rule ID in the debug block
+      // No lookup here — the active conv is populated when the user clicks Call Member.
+      // We still try one quick check in case the user placed a call earlier and we have a stashed id.
+      if (paskActiveConvId) {
+        setActiveConvUi(paskActiveConvId);
+      } else {
+        setActiveConvUi('');
+      }
+    }
+  }
+
+  let paskConfigLoaded = false;
+  async function loadPaskConfigIds() {
+    if (paskConfigLoaded) return;
+    try {
+      const res  = await fetch('api/personalized-ask/config');
+      const data = await res.json();
+      document.getElementById('paskDbgCfg').textContent  = data.intelligenceConfigurationId || '(not configured)';
+      document.getElementById('paskDbgRule').textContent = data.nbrRuleId || '(not configured)';
+      paskConfigLoaded = true;
+    } catch (e) {
+      document.getElementById('paskDbgCfg').textContent  = `lookup failed: ${e}`;
+      document.getElementById('paskDbgRule').textContent = '—';
+    }
+  }
+
+  /* ── Personalized Ask ────────────────────────────────────────── */
+  let paskSse = null;
+  let paskActiveConvId = '';
+  function startPaskSSE() {
+    if (paskSse) return; // lazy, one-time
+    paskSse = new EventSource(`api/personalized-ask/${encodeURIComponent(profileId)}/stream`);
+    paskSse.onmessage = (e) => {
+      try { appendPaskReply(JSON.parse(e.data)); } catch {}
+    };
+    paskSse.onerror = () => { /* browser auto-reconnects */ };
+  }
+
+  function setActiveConvUi(convId) {
+    const idEl  = document.getElementById('paskActiveId');
+    const dotEl = document.getElementById('paskActiveDot');
+    const dbgEl = document.getElementById('paskDbgConv');
+    if (dbgEl) dbgEl.textContent = convId || '(no active call — click Call Member)';
+    if (!idEl || !dotEl) return;
+    if (convId) {
+      idEl.textContent = convId;
+      dotEl.classList.remove('empty'); dotEl.classList.add('live');
+    } else {
+      idEl.textContent = 'no active call — click Call Member';
+      dotEl.classList.remove('live'); dotEl.classList.add('empty');
+    }
+  }
+
+  // Called from toggleBrowserCall() after the browser-call REST API returns.
+  // TAC populates its profile_latest_conv map inside /browser-answer-twiml (fires when
+  // Twilio dials in with TwiML) — so we retry briefly instead of polling forever.
+  async function captureActiveConvAfterCall() {
+    const attempts = 6;    // ~9s total
+    const delayMs  = 1500;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res  = await fetch(`api/personalized-ask/${encodeURIComponent(profileId)}/active-conv`);
+        const data = await res.json();
+        if (data.convId) {
+          paskActiveConvId = data.convId;
+          setActiveConvUi(paskActiveConvId);
+          return;
+        }
+      } catch { /* ignore and retry */ }
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+    // Final state — still empty
+    setActiveConvUi('');
+  }
+
+  function refreshActiveConv() {
+    // Manual refresh button — just re-asserts whatever we have (or triggers one more lookup).
+    captureActiveConvAfterCall();
+  }
+
+  function clearActiveConv() {
+    paskActiveConvId = '';
+    setActiveConvUi('');
+  }
+
+  function appendPaskReply(r) {
+    const history = document.getElementById('paskHistory');
+    const pending = history.querySelector('.pask-item.pending');
+    if (pending) pending.remove();
+    const item = document.createElement('div');
+    item.className = 'pask-item';
+    item.innerHTML = `
+      <div class="pask-item-q">${escHtml(r.question || '')}</div>
+      <div class="pask-item-a">${escHtml(r.response || '(no response from NBR — operator may have no grounding)')}</div>
+      <div class="pask-item-meta">NBR: ${Number(r.elapsedMs || 0).toLocaleString()} ms · ${escHtml(r.ts || '')}</div>
+    `;
+    history.insertBefore(item, history.firstChild);
+    const status = document.getElementById('paskStatus');
+    status.textContent = '';
+  }
+
+  async function paskSubmit() {
+    const q = document.getElementById('paskQuestion').value.trim();
+    if (!q) return;
+    const btn    = document.getElementById('btnPaskSubmit');
+    const status = document.getElementById('paskStatus');
+    btn.disabled = true; btn.textContent = 'Thinking…';
+    status.textContent = '';
+    // Insert placeholder; replaced by appendPaskReply when the webhook lands.
+    const history = document.getElementById('paskHistory');
+    const placeholder = document.createElement('div');
+    placeholder.className = 'pask-item pending';
+    placeholder.innerHTML = `
+      <div class="pask-item-q">${escHtml(q)}</div>
+      <div class="pask-item-a" style="opacity:.6"><em>Running NBR against this member's conversation…</em></div>
+    `;
+    history.insertBefore(placeholder, history.firstChild);
+    try {
+      const res  = await fetch('api/personalized-ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profileId, question: q, convId: paskActiveConvId }),
+      });
+      const data = await res.json();
+      // Always surface the IDs for debugging (server sends them on both success and error paths)
+      const dbg = document.getElementById('paskDebug');
+      document.getElementById('paskDbgConv').textContent  = data.convId || '(no active call — click Call Member)';
+      document.getElementById('paskDbgCfg').textContent   = data.intelligenceConfigurationId || '(not configured)';
+      document.getElementById('paskDbgRule').textContent  = data.nbrRuleId || '(not configured)';
+      document.getElementById('paskDbgExec').textContent  = data.executionSid || '—';
+      dbg.style.display = '';
+
+      if (!res.ok) {
+        placeholder.remove();
+        const err = document.createElement('div');
+        err.className = 'pask-error';
+        let msg = data.error || `Request failed (${res.status})`;
+        if (data.twilioStatus) msg += ` — Twilio responded ${data.twilioStatus}: ${JSON.stringify(data.twilioBody).slice(0, 300)}`;
+        err.textContent = msg;
+        history.insertBefore(err, history.firstChild);
+      } else {
+        document.getElementById('paskQuestion').value = '';
+        status.textContent = 'Waiting for Twilio NBR webhook…';
+      }
+    } catch (e) {
+      placeholder.remove();
+      const err = document.createElement('div');
+      err.className = 'pask-error';
+      err.textContent = String(e);
+      history.insertBefore(err, history.firstChild);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Ask';
+    }
   }
 
   /* ── Traits ──────────────────────────────────────────────────── */
@@ -643,6 +920,7 @@
   const UNMUTE_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
 
   function resetCallBtn() {
+    clearActiveConv();
     const btn = document.getElementById('btnBrowserCall');
     btn.disabled = false;
     btn.classList.remove('active');
@@ -734,6 +1012,8 @@
       const data = await res.json();
       if (!data.success) throw new Error(data.error);
       showToast(`Calling ${memberData.name}…`, 'info');
+      // Fetch the newly-created CO conversation ID (populated by TAC once /browser-answer-twiml fires)
+      captureActiveConvAfterCall();
     } catch (e) {
       showToast(`Failed to connect: ${e.message}`, 'error');
       resetCallBtn();
@@ -805,6 +1085,7 @@
       try {
         const data = JSON.parse(e.data);
         renderLiveGrid(data.operators || [], data.results || {});
+        renderNbr(data.nbr || []);
       } catch {}
     };
 
@@ -864,6 +1145,23 @@
           ${bodyHtml}
         </div>`;
     }).join('');
+  }
+
+  function renderNbr(pairs) {
+    const list = document.getElementById('nbrList');
+    const badge = document.getElementById('nbrCount');
+    badge.textContent = String(pairs.length);
+    if (!pairs.length) {
+      list.innerHTML = '<div class="live-card-empty" style="padding:8px">Waiting for next-best-response result…</div>';
+      return;
+    }
+    list.innerHTML = pairs.map(p => `
+      <div class="nbr-item">
+        ${p.userText ? `<div class="nbr-user"><span class="nbr-label">Member said</span><div class="nbr-text">${escHtml(p.userText)}</div></div>` : ''}
+        ${p.response ? `<div class="nbr-response"><span class="nbr-label">Suggested response</span><div class="nbr-text">${escHtml(p.response)}</div></div>` : ''}
+        ${p.ts ? `<div class="nbr-ts">${escHtml(p.ts)}</div>` : ''}
+      </div>
+    `).join('');
   }
 
   /* ── Init ────────────────────────────────────────────────────── */

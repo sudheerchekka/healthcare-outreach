@@ -10,3 +10,4 @@ httpx
 twilio
 google-cloud-aiplatform>=1.60.0  # Vertex AI Agent Engine SDK (used when AGENT_PROVIDER=vertexai)
 google-adk>=0.1.0                 # Google Agent Development Kit
+openai>=1.40.0                    # OpenAI SDK (used when AGENT_BACKEND=openai)

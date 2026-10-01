@@ -27,6 +27,7 @@ const VOICE_DOMAIN     = (process.env.VOICE_PUBLIC_DOMAIN ?? 'NOT_SET').replace(
 const OUTBOUND_CALL_TO = process.env.OUTBOUND_CALL_TO ?? '';
 const CI_SUMMARY_OPERATOR_SID  = process.env.TWILIO_TAC_CI_SUMMARY_OPERATOR_SID ?? '';
 const CI_OUTREACH_OPERATOR_SID = process.env.TWILIO_TAC_CI_OUTREACH_OPERATOR_SID ?? '';
+const CI_NBR_OPERATOR_SID      = process.env.TWILIO_TAC_CI_NBR_OPERATOR_SID ?? '';
 const TAC_PORT         = parseInt(process.env.TAC_PORT ?? '8000', 10);
 
 // ── Configurable live-results operator grid (up to 4 slots) ────────────────
@@ -45,6 +46,9 @@ const ciFlushTimers   = new Map<string, ReturnType<typeof setTimeout>>();
 
 // ── Live operator results store (profileId → operatorSid → result) ──────────
 const ciLiveResults = new Map<string, Record<string, { label: string; result: string; json?: unknown; ts: string }>>();
+// ── Next-Best-Response results (profileId → chronological pairs) ─────────────
+type NbrPair = { userText: string; response: string; ts: string };
+const nbrResults = new Map<string, NbrPair[]>();
 // ── SSE subscribers (profileId → set of response streams) ───────────────────
 const ciSseClients = new Map<string, Set<import('http').ServerResponse>>();
 // ── Transcript store (profileId → messages[]) ────────────────────────────────
@@ -153,6 +157,7 @@ export async function startHealthcareAppServer(): Promise<void> {
     // server reads it from the query string to look up pending context.
     if (profileId) {
       ciLiveResults.delete(profileId);
+      nbrResults.delete(profileId);
       transcriptMessages.delete(profileId);
       console.log(`[outbound-call] cleared CI results + transcript for profileId=${profileId}`);
     }
@@ -298,12 +303,17 @@ export async function startHealthcareAppServer(): Promise<void> {
   // ── Live CI operator results (snapshot) ─────────────────────────────────
   app.get('/api/ci-results/:profileId', async (req, reply) => {
     const { profileId } = req.params as { profileId: string };
-    reply.send({ operators: CI_OPERATORS, results: ciLiveResults.get(profileId) ?? {} });
+    reply.send({
+      operators: CI_OPERATORS,
+      results: ciLiveResults.get(profileId) ?? {},
+      nbr: nbrResults.get(profileId) ?? [],
+    });
   });
 
   app.delete('/api/ci-results/:profileId', async (req, reply) => {
     const { profileId } = req.params as { profileId: string };
     ciLiveResults.delete(profileId);
+    nbrResults.delete(profileId);
     console.log(`[CI] cleared results for profileId=${profileId}`);
     reply.send({ success: true });
   });
@@ -322,7 +332,8 @@ export async function startHealthcareAppServer(): Promise<void> {
 
     // Send cached results immediately if available, otherwise send empty snapshot
     const cached = ciLiveResults.get(profileId) ?? {};
-    const snapshot = { operators: CI_OPERATORS, results: cached };
+    const cachedNbr = nbrResults.get(profileId) ?? [];
+    const snapshot = { operators: CI_OPERATORS, results: cached, nbr: cachedNbr };
     raw.write(`data: ${JSON.stringify(snapshot)}\n\n`);
     if (Object.keys(cached).length > 0) {
       console.log(`[SSE] sent cached results to new subscriber profileId=${profileId} ops=${Object.keys(cached).join(',')}`);
@@ -655,8 +666,72 @@ export async function startHealthcareAppServer(): Promise<void> {
         console.log(`[CI] live result stored operatorId=${operatorId} label=${liveOp.label} profileId=${profileId}`);
         const sseCount = ciSseClients.get(profileId)?.size ?? 0;
         console.log(`[CI] SSE push to ${sseCount} subscriber(s) for profileId=${profileId}`);
-        const event = JSON.stringify({ operators: CI_OPERATORS, results: existing });
+        const event = JSON.stringify({ operators: CI_OPERATORS, results: existing, nbr: nbrResults.get(profileId) ?? [] });
         ciSseClients.get(profileId)?.forEach(client => client.write(`data: ${event}\n\n`));
+      }
+
+      // ── Next Best Response operator ───────────────────────────────────────
+      if (CI_NBR_OPERATOR_SID && operatorId === CI_NBR_OPERATOR_SID && profileId && resultField) {
+        console.log(`[CI][NBR] resultField shape: keys=${Object.keys(resultField).join(',')} raw=${JSON.stringify(resultField).slice(0, 400)}`);
+
+        // Extract candidate objects to search — resultField itself, plus payload if present
+        const candidates: Record<string, unknown>[] = [resultField as Record<string, unknown>];
+        const p = (resultField as Record<string, unknown>).payload
+          ?? ((resultField as Record<string, unknown>)['com.twilio.cai.intelligence.JSONResult'] as Record<string, unknown> | undefined)?.payload;
+        if (typeof p === 'string') {
+          try { candidates.push(JSON.parse(p) as Record<string, unknown>); }
+          catch (e) { console.warn(`[CI][NBR] payload JSON parse failed: ${e}`); }
+        } else if (typeof p === 'object' && p !== null) {
+          candidates.push(p as Record<string, unknown>);
+        }
+
+        // Find an array of pairs anywhere in the candidates
+        let rawItems: unknown[] = [];
+        for (const c of candidates) {
+          const arr = (c.interactions as unknown[]) ?? (c.pairs as unknown[]) ?? (c.responses as unknown[]);
+          if (Array.isArray(arr) && arr.length > 0) { rawItems = arr; break; }
+        }
+
+        const nowTs = formatTimestampPST(undefined);
+        const items: NbrPair[] = [];
+        for (const it of rawItems as Record<string, unknown>[]) {
+          const userText = String(
+            it.userText ?? it.user_text ?? it.user ?? it.member ?? it.memberText ?? it.question ?? it.utterance ?? ''
+          ).trim();
+          const response = String(
+            it.response ?? it.nextBestResponse ?? it.next_best_response ?? it.answer ?? it.suggestion ?? it.recommendation ?? ''
+          ).trim();
+          if (userText || response) items.push({ userText, response, ts: nowTs });
+        }
+
+        // TEXT/single-object format: {"response": "..."} directly on resultField or payload
+        if (items.length === 0) {
+          let single = '';
+          for (const c of candidates) {
+            single = String(
+              c.response ?? c.nextBestResponse ?? c.next_best_response
+              ?? c.answer ?? c.suggestion ?? c.recommendation ?? c.result ?? c.text ?? ''
+            ).trim();
+            if (single) break;
+          }
+          if (single) {
+            // Pair with latest member utterance from live transcript so the "what the user said" side is populated
+            const msgs = transcriptMessages.get(profileId) ?? [];
+            const lastMember = [...msgs].reverse().find(m => m.role === 'member');
+            items.push({ userText: lastMember?.text ?? '', response: single, ts: nowTs });
+          }
+        }
+
+        if (items.length > 0) {
+          const existingNbr = nbrResults.get(profileId) ?? [];
+          existingNbr.push(...items);
+          nbrResults.set(profileId, existingNbr);
+          console.log(`[CI][NBR] stored profileId=${profileId} +${items.length} total=${existingNbr.length}`);
+          const event = JSON.stringify({ operators: CI_OPERATORS, results: ciLiveResults.get(profileId) ?? {}, nbr: existingNbr });
+          ciSseClients.get(profileId)?.forEach(client => client.write(`data: ${event}\n\n`));
+        } else {
+          console.log(`[CI][NBR] no pairs extracted resultField keys=${Object.keys(resultField).join(',')}`);
+        }
       }
 
       // ── Summary operator ──────────────────────────────────────────────────

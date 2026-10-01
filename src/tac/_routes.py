@@ -8,6 +8,7 @@ from typing import Optional
 
 def register_app_routes(app, cfg, voice_channel, pending_outbound_context,
                         pending_call_sid_map, conv_app_map, outbound_conversation_map,
+                        profile_latest_conv, profile_app_map, conversation_call_sid_map, tac,
                         twilio_client, _APP_BACKENDS, _push_transcript_event,
                         _lookup_profile_id, _prefetch_memory, _build_memory_context,
                         _build_sms_system_prompt, _invoke_agent, _write_sms_observation,
@@ -274,20 +275,57 @@ def register_app_routes(app, cfg, voice_channel, pending_outbound_context,
     async def browser_answer_twiml(request: Request) -> Response:
         from datetime import datetime, timezone
         from tac.models import ParticipantAddress
+        from urllib.parse import quote
+        from xml.sax.saxutils import escape as xml_escape
         form = {k: str(v) for k, v in (await request.form()).items()}
         params = dict(request.query_params)
         call_sid = form.get("CallSid", "")
         member_phone = params.get("member_phone", form.get("To", ""))
         profile_id = params.get("profile_id", "")
         member_name = params.get("member_name", "member")
+        our_number = cfg.phone_number
+        resolved_profile_id = profile_id
         try:
-            from tac import TAC
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            # tac is accessible via closure from server.py — passed via _tac param
-        except Exception:
-            pass
-        twiml = ('<?xml version="1.0" encoding="UTF-8"?><Response><Dial>'
-                 '<Client>care-team-agent</Client></Dial></Response>')
+            conversation = await tac.conversation_orchestrator_client.create_conversation(
+                name=f"human-agent-call-{call_sid or ts}"
+            )
+            conv_id = conversation.id
+            member_resp = await tac.conversation_orchestrator_client.add_participant(
+                conversation_id=conv_id,
+                addresses=[ParticipantAddress(channel="VOICE", address=member_phone, channelId=call_sid)],
+                participant_type="CUSTOMER",
+            )
+            resolved_profile_id = (member_resp.profile_id if member_resp else None) or profile_id
+            await tac.conversation_orchestrator_client.add_participant(
+                conversation_id=conv_id,
+                addresses=[ParticipantAddress(channel="VOICE", address=our_number, channelId=call_sid)],
+                participant_type="AI_AGENT",
+            )
+            outbound_conversation_map[conv_id] = {
+                "phone": member_phone, "profileId": resolved_profile_id, "name": member_name,
+            }
+            conversation_call_sid_map[conv_id] = call_sid
+            conv_app_map[conv_id] = cfg.route_prefix
+            if resolved_profile_id:
+                profile_latest_conv[resolved_profile_id] = conv_id
+                profile_app_map[resolved_profile_id] = cfg.route_prefix
+                logger.info(f"[{cfg.id}][browser-call] profile_latest_conv[{resolved_profile_id}] = {conv_id}")
+            else:
+                logger.warning(f"[{cfg.id}][browser-call] no resolved_profile_id call_sid={call_sid} member_phone={member_phone}")
+        except Exception as e:
+            logger.error(f"[{cfg.id}][browser-call] failed to create CO conversation: {e}", exc_info=True)
+        # Real-time transcription — Twilio POSTs each utterance to this callback.
+        trx_cb_url = f"https://{PUBLIC_DOMAIN}/transcription-event?profile_id={quote(resolved_profile_id or '')}"
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Response>'
+            '<Start>'
+            f'<Transcription statusCallbackUrl="{xml_escape(trx_cb_url)}" track="both_tracks" partialResults="false"/>'
+            '</Start>'
+            '<Dial><Client>care-team-agent</Client></Dial>'
+            '</Response>'
+        )
         return Response(content=twiml, media_type="application/xml")
 
     logger.info(f"[config] registered routes for app={cfg.id} prefix={px}")

@@ -348,16 +348,95 @@ class VertexAIBackend:
         pass
 
 
-def _make_backend(cfg: "AppConfig") -> AgentCoreBackend | VertexAIBackend:
+class OpenAIBackend:
+    """OpenAI Chat Completions backend — per-session in-memory history, streamed per turn."""
+
+    def __init__(self, cfg: "AppConfig") -> None:
+        self._cfg = cfg
+        self._client = None
+        self._initialized = False
+        self._history: dict[str, list[dict]] = {}
+        self._model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+
+    def _get_client(self):
+        if self._initialized:
+            return self._client
+        self._initialized = True
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            logger.error(f"[{self._cfg.id}][openai] OPENAI_API_KEY not set")
+            return None
+        try:
+            from openai import AsyncOpenAI
+            self._client = AsyncOpenAI(api_key=api_key)
+            logger.info(f"[{self._cfg.id}][openai] initialized model={self._model}")
+        except Exception as e:
+            logger.error(f"[{self._cfg.id}][openai] init failed: {e}")
+            self._client = None
+        return self._client
+
+    async def prewarm(self, session_id: str) -> bool:
+        return self._get_client() is not None
+
+    async def invoke(self, session_id: str, prompt: str, system_prompt: str, context: str,
+                     member_phone: str = "", profile_id: str = "",
+                     member_traits: Optional[dict] = None) -> AsyncGenerator[dict, None]:
+        client = self._get_client()
+        if not client:
+            raise RuntimeError(f"[{self._cfg.id}] OpenAI client not initialized (check OPENAI_API_KEY)")
+
+        history = self._history.setdefault(session_id, [])
+        if not history:
+            sys_text = "\n\n".join(p for p in [system_prompt, context] if p)
+            if sys_text:
+                history.append({"role": "system", "content": sys_text})
+        history.append({"role": "user", "content": prompt})
+
+        t0 = time.time()
+        try:
+            stream = await client.chat.completions.create(
+                model=self._model,
+                messages=history,
+                stream=True,
+            )
+        except Exception as e:
+            logger.error(f"[{self._cfg.id}][openai] stream create failed: {e}")
+            raise
+
+        collected: list[str] = []
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            token = getattr(chunk.choices[0].delta, "content", None)
+            if token:
+                collected.append(token)
+                yield {"type": "text", "token": token, "last": False}
+        yield {"type": "text", "token": "", "last": True}
+
+        history.append({"role": "assistant", "content": "".join(collected)})
+        logger.info(f"[{self._cfg.id}][openai] session_id={session_id} turn complete "
+                    f"tokens={len(collected)} history_msgs={len(history)} in {(time.time()-t0)*1000:.0f}ms")
+
+    async def interrupt(self, session_id: str, utterance: str) -> None:
+        pass
+
+    async def close_session(self, session_id: str) -> None:
+        self._history.pop(session_id, None)
+
+
+def _make_backend(cfg: "AppConfig") -> "AgentCoreBackend | VertexAIBackend | OpenAIBackend":
     if cfg.agent_backend_name == "vertexai":
         logger.info(f"[{cfg.id}] agent provider: Vertex AI (Gemini)")
         return VertexAIBackend(cfg)
+    if cfg.agent_backend_name == "openai":
+        logger.info(f"[{cfg.id}] agent provider: OpenAI")
+        return OpenAIBackend(cfg)
     logger.info(f"[{cfg.id}] agent provider: AWS AgentCore")
     return AgentCoreBackend(cfg)
 
 
 # Per-app backend instances
-_APP_BACKENDS: dict[str, AgentCoreBackend | VertexAIBackend] = {
+_APP_BACKENDS: dict[str, "AgentCoreBackend | VertexAIBackend | OpenAIBackend"] = {
     prefix: _make_backend(cfg) for prefix, cfg in ALL_APPS.items()
 }
 
@@ -376,6 +455,10 @@ memory_context_cache: dict[str, str] = {}
 conv_app_map: dict[str, str] = {}
 # Maps profileId → route_prefix — survives conversation cleanup so CI webhook can still resolve app
 profile_app_map: dict[str, str] = {}
+# Reverse index: profileId → latest conv_id (any channel: voice/chat/browser). Updated whenever
+# we associate a profileId with a conv_id. Used by on-demand NBR (Personalized Ask) to find the
+# conversation to run operators against.
+profile_latest_conv: dict[str, str] = {}
 
 # Chat channel: Classic Conversations SID (CH...) ↔ CO conversation ID
 chat_classic_to_co: dict[str, str] = {}
@@ -1134,6 +1217,8 @@ class OwlVoiceChannel(VoiceChannel):
                     "phone": member_phone_resolved, "profileId": profile_id,
                     "name": member_name_resolved, "direction": direction,
                 }
+                if profile_id:
+                    profile_latest_conv[profile_id] = conv_id
                 logger.info(f"[setup] outbound_conversation_map[{conv_id}] phone={member_phone_resolved} profileId={profile_id}")
                 # Store greeting in cache — already pushed to transcript at /twiml time
                 greeting_text = _greeting_by_phone.pop(member_phone_resolved, "") or (ctx.get("greeting", "") if ctx else "")
@@ -1214,6 +1299,7 @@ class OwlVoiceChannel(VoiceChannel):
             logger.info(f"[setup] outbound_conversation_map[{conv_id}] phone={phone} direction={call_direction} profileId={member_profile_id or '(pending)'}")
             if member_profile_id and cfg:
                 profile_app_map[member_profile_id] = cfg.route_prefix
+                profile_latest_conv[member_profile_id] = conv_id
             greeting = ctx.get("greeting", "") if ctx else ""
             if greeting and member_profile_id:
                 asyncio.get_event_loop().create_task(
@@ -1458,6 +1544,10 @@ for _app_cfg in ALL_APPS.values():
         pending_call_sid_map=pending_call_sid_map,
         conv_app_map=conv_app_map,
         outbound_conversation_map=outbound_conversation_map,
+        profile_latest_conv=profile_latest_conv,
+        profile_app_map=profile_app_map,
+        conversation_call_sid_map=conversation_call_sid_map,
+        tac=tac,
         twilio_client=twilio_client,
         _APP_BACKENDS=_APP_BACKENDS,
         _push_transcript_event=_push_transcript_event,
@@ -1528,6 +1618,20 @@ async def get_outbound_phone(conv_id: str) -> dict:
     return {"phone": "", "profileId": ""}
 
 
+@app.get("/get-latest-conv/{profile_id}")
+async def get_latest_conv(profile_id: str) -> dict:
+    """Return the most recent CO conv_id associated with this member profile.
+
+    Used by the Personalized Ask tab (on-demand NBR rule execution) to find a conversation
+    to run operators against. Returns {"convId": ""} if the member has never had a tracked
+    conversation on this server instance (map is in-memory only).
+    """
+    conv_id = profile_latest_conv.get(profile_id, "")
+    app_prefix = profile_app_map.get(profile_id, "")
+    app_cfg = ALL_APPS.get(app_prefix)
+    return {"convId": conv_id, "appId": app_cfg.id if app_cfg else ""}
+
+
 @app.post("/ci-webhook")
 async def ci_webhook_proxy(request: Request) -> dict:
     """Forward CI webhook to the shared Node.js /ci-webhook route."""
@@ -1570,41 +1674,48 @@ async def node_api_proxy(path: str, request: Request) -> Response:
         return Response(content=b'{"error":"proxy failed"}', status_code=502, media_type="application/json")
 
 
-@app.post("/browser-answer-twiml")
-async def browser_answer_twiml(request: Request) -> Response:
-    from datetime import datetime, timezone
-    from tac.models import ParticipantAddress
+# NOTE: The real /healthcare/browser-answer-twiml handler lives in _routes.py (per-app
+# prefix). This unprefixed route is intentionally not registered — Node's /api/browser-call
+# always builds a URL with the app prefix, so Twilio never hits a path without it.
+
+
+@app.post("/transcription-event")
+async def transcription_event(request: Request) -> Response:
+    """Twilio real-time Transcription callback — forwards finals to Node /transcript-event."""
     form = {k: str(v) for k, v in (await request.form()).items()}
-    params = dict(request.query_params)
-    call_sid = form.get("CallSid", "")
-    member_phone = params.get("member_phone", form.get("To", ""))
-    profile_id = params.get("profile_id", "")
-    member_name = params.get("member_name", "member")
-    # Use first app's phone number for AI_AGENT participant
-    first_cfg = next(iter(ALL_APPS.values())) if ALL_APPS else None
-    our_number = first_cfg.phone_number if first_cfg else ""
+    profile_id = request.query_params.get("profile_id", "")
+    event = form.get("TranscriptionEvent", "")
+    is_final = form.get("Final", "false").lower() == "true"
+    track = form.get("Track", "")  # inbound_track = member, outbound_track = client/agent
+    sequence = form.get("SequenceId", "")
+    data_raw = form.get("TranscriptionData", "")
+    text = ""
+    if data_raw:
+        try:
+            text = (json.loads(data_raw) or {}).get("transcript", "") or ""
+        except Exception as e:
+            logger.warning(f"[transcription-event] TranscriptionData parse failed: {e} raw={data_raw[:200]}")
+
+    if event != "transcription-content":
+        logger.info(f"[transcription-event] event={event} profile_id={profile_id} track={track}")
+        return Response(status_code=204)
+
+    if not profile_id or not text or not is_final:
+        return Response(status_code=204)
+
+    role = "member" if track == "inbound_track" else "agent"
+    logger.info(f"[transcription-event] seq={sequence} role={role} profile_id={profile_id} text=\"{text[:100]}\"")
+
     try:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        conversation = await tac.conversation_orchestrator_client.create_conversation(name=f"human-agent-call-{call_sid or ts}")
-        conv_id = conversation.id
-        member_resp = await tac.conversation_orchestrator_client.add_participant(
-            conversation_id=conv_id,
-            addresses=[ParticipantAddress(channel="VOICE", address=member_phone, channelId=call_sid)],
-            participant_type="CUSTOMER",
-        )
-        resolved_profile_id = (member_resp.profile_id if member_resp else None) or profile_id
-        await tac.conversation_orchestrator_client.add_participant(
-            conversation_id=conv_id,
-            addresses=[ParticipantAddress(channel="VOICE", address=our_number, channelId=call_sid)],
-            participant_type="AI_AGENT",
-        )
-        outbound_conversation_map[conv_id] = {"phone": member_phone, "profileId": resolved_profile_id, "name": member_name}
-        conversation_call_sid_map[conv_id] = call_sid
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"http://localhost:{APP_PORT}/transcript-event",
+                json={"profileId": profile_id, "role": role, "text": text},
+                timeout=3,
+            )
     except Exception as e:
-        logger.error(f"[browser-call] failed to create CO conversation: {e}")
-    twiml = ('<?xml version="1.0" encoding="UTF-8"?><Response><Dial>'
-             '<Client>care-team-agent</Client></Dial></Response>')
-    return Response(content=twiml, media_type="application/xml")
+        logger.warning(f"[transcription-event] forward to Node failed: {e}")
+    return Response(status_code=204)
 
 
 @app.post("/browser-call-status")
@@ -1869,6 +1980,9 @@ async def conversations_webhook(request: Request) -> dict:
             outbound_conversation_map[co_conv_id] = {
                 "phone": visitor_phone, "profileId": profile_id, "name": ""
             }
+            if profile_id:
+                profile_latest_conv[profile_id] = co_conv_id
+                profile_app_map[profile_id] = cfg.route_prefix
             logger.info(f"[{cfg.id}][chat] CO conversation created co_conv_id={co_conv_id}")
         except Exception as e:
             logger.error(f"[{cfg.id}][chat] CO conversation creation failed: {e}", exc_info=True)
@@ -2019,6 +2133,9 @@ async def chat_message(request: Request) -> dict:
                 or traits.get("name", "")
             ) if traits else ""
             outbound_conversation_map[co_conv_id] = {"phone": visitor_phone, "profileId": profile_id, "name": member_name_for_map}
+            if profile_id:
+                profile_latest_conv[profile_id] = co_conv_id
+                profile_app_map[profile_id] = cfg.route_prefix
             logger.info(f"[{cfg.id}][chat] CO conversation created co_conv_id={co_conv_id} name={member_name_for_map!r}")
         except Exception as e:
             logger.error(f"[{cfg.id}][chat] CO creation failed: {e}", exc_info=True)

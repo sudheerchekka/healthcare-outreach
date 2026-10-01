@@ -21,10 +21,15 @@ export interface AppConfig {
   voiceDomain: string;
   ciSummaryOperatorSid: string;
   ciOutreachOperatorSid: string;
+  ciNbrOperatorSid: string;
   smsWriteObservation: boolean;
   ciOperators: CiOperatorConfig[];
   verifyServiceSid: string;
   smsSimulateMemberPhone: string;
+  knowledgeBaseId: string;
+  knowledgeTop: number;
+  intelligenceConfigurationId: string;
+  nbrRuleId: string;
   clientDir: string;          // absolute path to the client/ directory
 }
 
@@ -43,9 +48,14 @@ interface RawAppJson {
   voice_domain_env: string;
   ci_summary_operator_env: string;
   ci_outreach_operator_env: string;
+  ci_nbr_operator_env: string;
   sms_write_observation_env: string;
   verify_service_sid_env: string;
   sms_simulate_member_phone_env: string;
+  kb_id_env: string;
+  knowledge_top_env: string;
+  intelligence_configuration_env: string;
+  nbr_rule_env: string;
   ci_operators: { sid_env: string; label_env: string; default_label: string }[];
 }
 
@@ -79,9 +89,14 @@ export function loadAppConfigs(): AppConfig[] {
         voiceDomain: ev(raw.voice_domain_env).replace(/^https?:\/\//, ''),
         ciSummaryOperatorSid: ev(raw.ci_summary_operator_env),
         ciOutreachOperatorSid: ev(raw.ci_outreach_operator_env),
+        ciNbrOperatorSid: ev(raw.ci_nbr_operator_env),
         smsWriteObservation: ev(raw.sms_write_observation_env, 'false').toLowerCase() === 'true',
         verifyServiceSid: ev(raw.verify_service_sid_env ?? ''),
         smsSimulateMemberPhone: ev(raw.sms_simulate_member_phone_env ?? ''),
+        knowledgeBaseId: ev(raw.kb_id_env ?? ''),
+        knowledgeTop: Math.max(1, parseInt(ev(raw.knowledge_top_env ?? '', '1'), 10) || 1),
+        intelligenceConfigurationId: ev(raw.intelligence_configuration_env ?? ''),
+        nbrRuleId: ev(raw.nbr_rule_env ?? ''),
         ciOperators,
         clientDir: path.join(appsDir, appId, 'client'),
       });

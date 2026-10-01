@@ -13,8 +13,12 @@
   "voice_domain_env": "VOICE_PUBLIC_DOMAIN",
   "ci_summary_operator_env": "TWILIO_TAC_CI_SUMMARY_OPERATOR_SID",
   "ci_outreach_operator_env": "TWILIO_TAC_CI_OUTREACH_OPERATOR_SID",
+  "ci_nbr_operator_env": "TWILIO_TAC_CI_NBR_OPERATOR_SID",
   "sms_write_observation_env": "SMS_WRITE_OBSERVATION",
   "kb_id_env": "HEALTHCARE_KB_ID",
+  "knowledge_top_env": "KNOWLEDGE_TOP",
+  "intelligence_configuration_env": "TWILIO_INTELLIGENCE_CONFIGURATION_ID",
+  "nbr_rule_env": "TWILIO_NBR_RULE_ID",
   "verify_service_sid_env": "TWILIO_VERIFY_SERVICE_SID",
   "sms_simulate_member_phone_env": "SMS_SIMULATE_MEMBER_PHONE",
   "ci_operators": [
