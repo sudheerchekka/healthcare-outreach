@@ -54,7 +54,7 @@ const CONTACT_TRAITS: Record<string, string> = {
 
 const OUTREACH_TRAITS: Record<string, string> = {
   nextFollowUp:       'Medication Adherence Check',
-  nextFollowUpReason: 'Verify patient is taking prescribed Metamorphin. Also ask if they observed any new symptoms',
+  nextFollowUpReason: 'Verify if patient is taking prescribed Metamorphin. Also ask if they observed any new symptoms',
   status:             'pending',
   lastCallSummary:    '',
   outreachResponses:  '',

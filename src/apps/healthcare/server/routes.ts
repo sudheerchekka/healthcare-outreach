@@ -962,15 +962,34 @@ export async function handleCiWebhook(
 
   if (!profileId && memberPhone) profileId = await lookupProfileId(memberPhone, creds);
 
-  // Only process CI from the first conv_id for this profile — skip subsequent convs (e.g. Flex conv).
-  // On-demand Personalized Ask runs may target an older conv_id and must bypass this filter.
+  // Winner-takes-all filter: Twilio CO sometimes splits a single call into multiple
+  // conversations (e.g. the agent's goodbye line after ConversationRelay ends creates
+  // a second conv with 1 message). We only want the "real" conv — the one with the
+  // most communications — to update the dashboard. Fetch message counts and compare.
+  // On-demand Personalized Ask runs bypass the filter entirely.
   if (profileId && !pendingAsk) {
     const firstConv = ciFirstConvId.get(profileId);
     if (!firstConv) {
       ciFirstConvId.set(profileId, convId);
     } else if (firstConv !== convId) {
-      console.log(`[CI] skipping conv_id=${convId} for profileId=${profileId} — first conv was ${firstConv}`);
-      return;
+      // Compare communication counts: whichever conv has more messages is the real call.
+      const countComms = async (cid: string): Promise<number> => {
+        try {
+          const r = await axios.get(
+            `https://conversations.twilio.com/v2/Conversations/${cid}/Communications?pageSize=200`,
+            { auth: { username: cfg.apiKey, password: cfg.apiToken }, timeout: 5_000 },
+          );
+          return ((r.data?.communications ?? []) as unknown[]).length;
+        } catch { return -1; }
+      };
+      const [storedCount, incomingCount] = await Promise.all([countComms(firstConv), countComms(convId)]);
+      if (incomingCount > storedCount) {
+        console.log(`[CI] replacing stored conv ${firstConv} (${storedCount} msgs) with ${convId} (${incomingCount} msgs) for profileId=${profileId}`);
+        ciFirstConvId.set(profileId, convId);
+      } else {
+        console.log(`[CI] skipping conv_id=${convId} (${incomingCount} msgs) for profileId=${profileId} — stored conv ${firstConv} has ${storedCount} msgs`);
+        return;
+      }
     }
   }
 
