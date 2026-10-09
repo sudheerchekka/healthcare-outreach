@@ -337,7 +337,17 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     const dialTo = cfg.outboundCallTo || normalizePhone(phone);
     const memberPhone = normalizePhone(phone);
     if (!dialTo) return reply.status(400).send({ success: false, error: 'No destination number' });
-    if (profileId) { ciLiveResults.delete(profileId); nbrResults.delete(profileId); ciFirstConvId.delete(profileId); }
+    if (profileId) {
+      ciLiveResults.delete(profileId);
+      nbrResults.delete(profileId);
+      ciFirstConvId.delete(profileId);
+      transcriptMessages.delete(profileId);
+      // Notify any open UI tabs so they clear immediately (don't wait for the next webhook)
+      const resetEvent = JSON.stringify({ operators: cfg.ciOperators, results: {}, nbr: [] });
+      ciSseClients.get(profileId)?.forEach(c => c.write(`data: ${resetEvent}\n\n`));
+      transcriptSseClients.get(profileId)?.forEach(c => c.write(`event: reset\ndata: {}\n\n`));
+      console.log(`[${cfg.id}][browser-call] cleared NBR, transcript, operator results for profileId=${profileId}`);
+    }
     const answerParams = new URLSearchParams({ member_phone: memberPhone, profile_id: profileId, member_name: name });
     const answerUrl = `https://${cfg.voiceDomain}${tacPx}/browser-answer-twiml?${answerParams}`;
     const statusCallback = `https://${cfg.voiceDomain}${tacPx}/browser-call-status`;
@@ -869,7 +879,7 @@ export async function handleCiWebhook(
   payload: Record<string, unknown>,
   state: AppRouteState,
 ): Promise<void> {
-  const { cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, scheduleCIFlush, formatTimestampPST, ciFirstConvId, nbrResults, transcriptMessages, pendingNbrAsks, askReplies, askSseClients } = state;
+  const { cfg, creds, ciLiveResults, ciSseClients, ciPendingTraits, scheduleCIFlush, formatTimestampPST, ciFirstConvId, nbrResults, transcriptMessages, transcriptSseClients, pendingNbrAsks, askReplies, askSseClients } = state;
   const data = (payload.data ?? payload) as Record<string, unknown>;
   const convId: string = (data.conversationId as string) ?? (payload.conversationId as string) ?? '';
   const operatorResults: unknown[] = (payload.operatorResults as unknown[]) ?? [];
@@ -969,7 +979,8 @@ export async function handleCiWebhook(
 
     // ── Next Best Response operator ─────────────────────────────────────────
     if (cfg.ciNbrOperatorSid && operatorId === cfg.ciNbrOperatorSid && profileId && resultField) {
-      console.log(`[CI][NBR] matched operatorId=${operatorId} resultField=${JSON.stringify(resultField).slice(0, 400)}`);
+      console.log(`[CI][NBR] matched operatorId=${operatorId}`);
+      console.log(`[CI][NBR] result (full): ${JSON.stringify(result, null, 2)}`);
 
       // Collect candidate objects: resultField, plus any parsed `payload` wrapper
       const candidates: Record<string, unknown>[] = [resultField];
@@ -1012,9 +1023,34 @@ export async function handleCiWebhook(
           if (single) break;
         }
         if (single) {
-          const msgs = transcriptMessages.get(profileId) ?? [];
-          const lastMember = [...msgs].reverse().find(m => m.role === 'member');
-          items.push({ userText: lastMember?.text ?? '', response: single, ts: nowTs });
+          // Resolve the member utterance that triggered this NBR run. CO is authoritative — CI
+          // operates on what's in /Communications, which may include messages we never saw on
+          // our transcript SSE (e.g. passive capture rules, injected Ask text). Fall back to
+          // the local transcript store only if CO lookup fails.
+          let userText = '';
+          try {
+            const commRes = await axios.get(
+              `https://conversations.twilio.com/v2/Conversations/${convId}/Communications`,
+              { auth: { username: cfg.apiKey, password: cfg.apiToken }, timeout: 5_000 },
+            );
+            const comms = ((commRes.data?.communications ?? []) as Array<{
+              author?: { address?: string }; content?: { text?: string }; occurredAt?: string;
+            }>);
+            // Latest message from the CUSTOMER (not our Twilio number). CO already orders by
+            // createdAt desc by default, but sort explicitly to be safe.
+            const sorted = [...comms].sort((a, b) => (b.occurredAt ?? '').localeCompare(a.occurredAt ?? ''));
+            const latestCustomer = sorted.find(c => (c.author?.address ?? '') !== cfg.phoneNumber && !!c.content?.text);
+            userText = latestCustomer?.content?.text ?? '';
+          } catch (e: unknown) {
+            const ax = e as { response?: { status?: number } };
+            console.warn(`[CI][NBR] CO lookup for userText failed status=${ax.response?.status} — falling back to local transcript`);
+          }
+          if (!userText) {
+            const msgs = transcriptMessages.get(profileId) ?? [];
+            const lastMember = [...msgs].reverse().find(m => m.role === 'member');
+            userText = lastMember?.text ?? '';
+          }
+          items.push({ userText, response: single, ts: nowTs });
         }
       }
 
