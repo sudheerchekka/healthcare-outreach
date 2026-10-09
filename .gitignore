@@ -22,3 +22,7 @@ npm-debug.log*
 # Vendored SDK — copy from ~/.claude/cache/twilio-agent-connect-python before docker build
 vendor/
 elevenlabs/__pycache__/
+
+# Terminal scratch files from accidental `source .env` picking up `Script Adherence` as a command
+# (`CI_OPERATOR_2_LABEL=" Script Adherence"` → shell ran /usr/bin/script → wrote this file).
+Adherence

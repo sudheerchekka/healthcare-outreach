@@ -1,175 +1,0 @@
-Script started on Wed Sep 30 18:23:48 2026
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node[0m[27m[24m[Jschekka@FR20VGXKCG healthcare-outreach-node % [K[?2004h[7mcd /Users/schekka/projects/sierra-projects/healthcare-outreach-node[27m[67D[27mc[27md[27m [27m/[27mU[27ms[27me[27mr[27ms[27m/[27ms[27mc[27mh[27me[27mk[27mk[27ma[27m/[27mp[27mr[27mo[27mj[27me[27mc[27mt[27ms[27m/[27ms[27mi[27me[27mr[27mr[27ma[27m-[27mp[27mr[27mo[27mj[27me[27mc[27mt[27ms[27m/[27mh[27me[27ma[27ml[27mt[27mh[27mc[27ma[27mr[27me[27m-[27mo[27mu[27mt[27mr[27me[27ma[27mc[27mh[27m-[27mn[27mo[27md[27me[?2004l
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node[0m[27m[24m[Jschekka@FR20VGXKCG healthcare-outreach-node % [K[?2004h[7msource .env[27m[11D[27ms[27mo[27mu[27mr[27mc[27me[27m [27m.[27me[27mn[27mv[?2004l
-Script started, output file is Adherence
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node[0m[27m[24m[Jschekka@FR20VGXKCG healthcare-outreach-node % [K[?2004hvvi .env[?2004l
-[?1049h[>4;2m[?1h=[?2004h[?1004h[1;55r[?12h[?12l[22;2t[22;1t[27m[23m[29m[m[H[2J[?25l[55;1H".env" 125L, 7237B[2;1H▽[6n[2;1H  [3;1HPzz\[0%m[6n[3;1H           [1;1H[>c]11;?]10;?[1;1H# ─[1;4H─[1;6HTwilio credentials (TAC SDK env var names) ─[1;50H─[1;51H─[1;52H─[1;53H─[1;54H─[1;55H─[1;56H─[1;57H─[1;58H─[1;59H─[1;60H─[1;61H─[1;62H─[1;63H─[1;64H─[1;65H─[1;66H─[1;67H─[1;68H─[1;69H─[1;70H─[1;71H─[1;72H─[1;73H─[1;74H─[1;75H─[1;76H─[1;77H─[2;1HTWILIO_ACCOUNT_SID=AC72eac3bee04c1635c4e01335ece799c7[2;54H[K[3;1HTWILIO_AUTH_TOKEN=36db2be55c6d343bbbb11f1844264fb6[3;51H[K[4;1HTWILIO_API_KEY=SK0dff0391b747cf9458f54858443a1ef9
-TWILIO_API_SECRET=YoesjU4ePflu2XkwBSsNUhbcKk7dV1Wl
-TWILIO_PHONE_NUMBER=+18886095376
-TWILIO_TAC_ENVIRONMENT=prod
-TWILIO_FLEX_WORKSPACE_SID=WS809af1270322355fa490e596e745c4d9
-# Conversation Configuration ID (conv_configuration_*)
-TWILIO_CONVERSATION_CONFIGURATION_ID=conv_configuration_01knn5ke4pefxs9t0mk99ce39x
-#TWILIO_CONVERSATION_CONFIGURATION_ID=conv_configuration_01ktjd1mf3e2s8jye39k9wcvn7
-
-#using it to enqueue broswer call to Flex
-TWILIO_FLEX_WORKFLOW_SID=WWd36c06d5e57ac18655635f886af62f1f
-# ─[15;4H─[15;6HTwilio Verify ─[15;21H─[15;22H─[15;23H─[15;24H─[15;25H─[15;26H─[15;27H─[15;28H─[15;29H─[15;30H─[15;31H─[15;32H─[15;33H─[15;34H─[15;35H─[15;36H─[15;37H─[15;38H─[15;39H─[15;40H─[15;41H─[15;42H─[15;43H─[15;44H─[15;45H─[15;46H─[15;47H─[15;48H─[15;49H─[15;50H─[15;51H─[15;52H─[15;53H─[15;54H─[15;55H─[15;56H─[15;57H─[15;58H─[15;59H─[15;60H─[15;61H─[15;62H─[15;63H─[15;64H─[15;65H─[15;66H─[15;67H─[15;68H─[15;69H─[15;70H─[15;71H─[15;72H─[15;73H─[15;74H─[15;75H─[15;76H─[15;77H─[16;1H# Create a Verify Service in Twilio Console →[16;47HVerify →[16;56HServices
-TWILIO_VERIFY_SERVICE_SID=VAa7f513b563e3bf61bd4f9992740d5192
-
-OPENAI_API_KEY=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
-OPENAI_MODEce configuration
-## Conversation Orchestrator configuration
-
-HEALTHCARE_KB_ID=know_knowledgebase_01ktb2ky4rf05tzbkf3gnq72dt
-
-# ─[48;4H─[48;6HTwilio Memory Store ─[48;27H─[48;28H─[48;29H─[48;30H─[48;31H─[48;32H─[48;33H─[48;34H─[48;35H─[48;36H─[48;37H─[48;38H─[48;39H─[48;40H─[48;41H─[48;42H─[48;43H─[48;44H─[48;45H─[48;46H─[48;47H─[48;48H─[48;49H─[48;50H─[48;51H─[48;52H─[48;53H─[48;54H─[48;55H─[48;56H─[48;57H─[48;58H─[48;59H─[48;60H─[48;61H─[48;62H─[48;63H─[48;64H─[48;65H─[48;66H─[48;67H─[48;68H─[48;69H─[48;70H─[48;71H─[48;72H─[48;73H─[48;74H─[48;75H─[48;76H─[48;77H─[49;1HMEMORY_STORE_ID=mem_store_01knn5k4dmfqv852sy120372km
-
-TWILIO_CHAT_CONVERSATION_SERVICE_SID=ISc50c6a12541a4fa987229c60ab34b1d1
-# ─[52;4H─[52;6HConversation Intelligence ─[52;33H─[52;34H─[52;35H─[52;36H─[52;37H─[52;38H─[52;39H─[52;40H─[52;41H─[52;42H─[52;43H─[52;44H─[52;45H─[52;46H─[52;47H─[52;48H─[52;49H─[52;50H─[52;51H─[52;52H─[52;53H─[52;54H─[52;55H─[52;56H─[52;57H─[52;58H─[52;59H─[52;60H─[52;61H─[52;62H─[52;63H─[52;64H─[52;65H─[52;66H─[52;67H─[52;68H─[52;69H─[52;70H─[52;71H─[52;72H─[52;73H─[52;74H─[52;75H─[52;76H─[52;77H─[53;1H# SID of the summary operator (from your CI configuration)
-TWILIO_TAC_CI_SUMMARY_OPERATOR_SID=intelligence_operator_01kcv35pnkeysaf6z6cqtbpegn[1;1H[?25h[?4m[?25l[55;193H~@k[1;1H[55;193H   [1;1H[27m[23m[29m[m[H[2J[1;1H# ─[1;4H─[1;6HTwilio credentials (TAC SDK env var names) ─[1;50H─[1;51H─[1;52H─[1;53H─[1;54H─[1;55H─[1;56H─[1;57H─[1;58H─[1;59H─[1;60H─[1;61H─[1;62H─[1;63H─[1;64H─[1;65H─[1;66H─[1;67H─[1;68H─[1;69H─[1;70H─[1;71H─[1;72H─[1;73H─[1;74H─[1;75H─[1;76H─[1;77H─[2;1HTWILIO_ACCOUNT_SID=AC72eac3bee04c1635c4e01335ece799c7
-TWILIO_AUTH_TOKEN=36db2be55c6d343bbbb11f1844264fb6
-TWILIO_API_KEY=SK0dff0391b747cf9458f54858443a1ef9
-TWILIO_API_SECRET=YoesjU4ePflu2XkwBSsNUhbcKk7dV1Wl
-TWILIO_PHONE_NUMBER=+18886095376
-TWILIO_TAC_ENVIRONMENT=prod
-TWILIO_FLEX_WORKSPACE_SID=WS809af1270322355fa490e596e745c4d9
-# Conversation Configuration ID (conv_configuration_*)
-TWILIO_CONVERSATION_CONFIGURATION_ID=conv_configuration_01knn5ke4pefxs9t0mk99ce39x
-#TWILIO_CONVERSATION_CONFIGURATION_ID=conv_configuration_01ktjd1mf3e2s8jye39k9wcvn7
-
-#using it to enqueue broswer call to Flex
-TWILIO_FLEX_WORKFLOW_SID=WWd36c06d5e57ac18655635f886af62f1f
-# ─[15;4H─[15;6HTwilio Verify ─[15;21H─[15;22H─[15;23H─[15;24H─[15;25H─[15;26H─[15;27H─[15;28H─[15;29H─[15;30H─[15;31H─[15;32H─[15;33H─[15;34H─[15;35H─[15;36H─[15;37H─[15;38H─[15;39H─[15;40H─[15;41H─[15;42H─[15;43H─[15;44H─[15;45H─[15;46H─[15;47H─[15;48H─[15;49H─[15;50H─[15;51H─[15;52H─[15;53H─[15;54H─[15;55H─[15;56H─[15;57H─[15;58H─[15;59H─[15;60H─[15;61H─[15;62H─[15;63H─[15;64H─[15;65H─[15;66H─[15;67H─[15;68H─[15;69H─[15;70H─[15;71H─[15;72H─[15;73H─[15;74H─[15;75H─[15;76H─[15;77H─[16;1H# Create a Verify Service in Twilio Console →[16;47HVerify →[16;56HServices
-TWILIO_VERIFY_SERVICE_SID=VAa7f513b563e3bf61bd4f9992740d5192
-
-OPENAI_API_KEY=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
-OPENAI_MODEL=gpt-4o
-
-# Set to true to log full CI webhook payloads and per-operator detail (verbose, off by default)
-CI_VERBOSE_LOGS=true
-
-
-#Voice Client
-TWILIO_TWIML_APP_SID=APa83abcb917fe1c0c46faaaa198521977
-
-
-# Override: always dial this number for outbound calls (testing)
-# Set to your test phone to redirect all outbound calls during dev.
-# Leave blank to dial the actual member phone number.
-OUTBOUND_CALL_TO=+14083985848
-# Override: simulate this member phone when texting from OUTBOUND_CALL_TO (leave blank to disable)
-SMS_SIMULATE_MEMBER_PHONE=+14083985848
-
-
-# ─[38;4H─[38;6HVoice configuration ─[38;27H─[38;28H─[38;29H─[38;30H─[38;31H─[38;32H─[38;33H─[38;34H─[38;35H─[38;36H─[38;37H─[38;38H─[38;39H─[38;40H─[38;41H─[38;42H─[38;43H─[38;44H─[38;45H─[38;46H─[38;47H─[38;48H─[38;49H─[38;50H─[38;51H─[38;52H─[38;53H─[38;54H─[38;55H─[38;56H─[38;57H─[38;58H─[38;59H─[38;60H─[38;61H─[38;62H─[38;63H─[38;64H─[38;65H─[38;66H─[38;67H─[38;68H─[38;69H─[38;70H─[38;71H─[38;72H─[38;73H─[38;74H─[38;75H─[38;76H─[38;77H─[39;1H# Your ngrok public domain (without https://), e.g. abc123.ngrok.io
-VOICE_PUBLIC_DOMAIN=https://sudheer.ngrok.io
-#Twilio console config:
-##webhook for SMS and Voice of the Twilio number
-## All LO webhooks under Intelligence configuration
-## Conversation Orchestrator configuration
-
-HEALTHCARE_KB_ID=know_knowledgebase_01ktb2ky4rf05tzbkf3gnq72dt
-
-# ─[48;4H─[48;6HTwilio Memory Store ─[48;27H─[48;28H─[48;29H─[48;30H─[48;31H─[48;32H─[48;33H─[48;34H─[48;35H─[48;36H─[48;37H─[48;38H─[48;39H─[48;40H─[48;41H─[48;42H─[48;43H─[48;44H─[48;45H─[48;46H─[48;47H─[48;48H─[48;49H─[48;50H─[48;51H─[48;52H─[48;53H─[48;54H─[48;55H─[48;56H─[48;57H─[48;58H─[48;59H─[48;60H─[48;61H─[48;62H─[48;63H─[48;64H─[48;65H─[48;66H─[48;67H─[48;68H─[48;69H─[48;70H─[48;71H─[48;72H─[48;73H─[48;74H─[48;75H─[48;76H─[48;77H─[49;1HMEMORY_STORE_ID=mem_store_01knn5k4dmfqv852sy120372km
-
-TWILIO_CHAT_CONVERSATION_SERVICE_SID=ISc50c6a12541a4fa987229c60ab34b1d1
-# ─[52;4H─[52;6HConversation Intelligence ─[52;33H─[52;34H─[52;35H─[52;36H─[52;37H─[52;38H─[52;39H─[52;40H─[52;41H─[52;42H─[52;43H─[52;44H─[52;45H─[52;46H─[52;47H─[52;48H─[52;49H─[52;50H─[52;51H─[52;52H─[52;53H─[52;54H─[52;55H─[52;56H─[52;57H─[52;58H─[52;59H─[52;60H─[52;61H─[52;62H─[52;63H─[52;64H─[52;65H─[52;66H─[52;67H─[52;68H─[52;69H─[52;70H─[52;71H─[52;72H─[52;73H─[52;74H─[52;75H─[52;76H─[52;77H─[53;1H# SID of the summary operator (from your CI configuration)
-TWILIO_TAC_CI_SUMMARY_OPERATOR_SID=intelligence_operator_01kcv35pnkeysaf6z6cqtbpegn[1;1H[?25h[?25l[55;193H~@k[1;1H[55;193H   [2;1H[?25h[?25l[55;193H~@k[2;1H[55;193H   [3;1H[?25h[?25l[55;193H~@k[3;1H[55;193H   [4;1H[?25h[?25l[55;193H~@k[4;1H[55;193H   [5;1H[?25h[?25l[55;193H~@k[5;1H[55;193H   [6;1H[?25h[?25l[55;193H~@k[6;1H[55;193H   [7;1H[?25h[?25l[55;193H~@k[7;1H[55;193H   [8;1H[?25h[?25l[55;193H~@k[8;1H[55;193H   [9;1H[?25h[?25l[55;193H~@k[9;1H[55;193H   [10;1H[?25h[?25l[55;193H~@k[10;1H[55;193H   [11;1H[?25h[?25l[55;193H~@k[11;1H[55;193H   [12;1H[?25h[?25l[55;193H~@k[12;1H[55;193H   [13;1H[?25h[?25l[55;193H~@k[13;1H[55;193H   [14;1H[?25h[?25l[55;193H~@k[14;1H[55;193H   [15;1H[?25h[?25l[55;193H~@k[15;1H[55;193H   [16;1H[?25h[?25l[55;193H~@k[16;1H[55;193H   [17;1H[?25h[?25l[55;193H~@k[17;1H[55;193H   [18;1H[?25h[?25l[55;193H~@k[18;1H[55;193H   [19;1H[?25h[?25l[55;193H~@k[19;1H[55;193H   [20;1H[?25h[?25l[55;193H~@k[20;1H[55;193H   [21;1H[?25h[?25l[55;193H~@k[21;1H[55;193H   [22;1H[?25h[?25l[55;193H~@k[22;1H[55;193H   [23;1H[?25h[?25l[55;193H~@k[23;1H[55;193H   [24;1H[?25h[?25l[55;193H~@k[24;1H[55;193H   [25;1H[?25h[?25l[55;193H~@k[25;1H[55;193H   [26;1H[?25h[?25l[55;193H~@k[26;1H[55;193H   [27;1H[?25h[?25l[55;193H~@k[27;1H[55;193H   [28;1H[?25h[?25l[55;193H~@k[28;1H[55;193H   [29;1H[?25h[?25l[55;193H~@k[29;1H[55;193H   [30;1H[?25h[?25l[55;193H~@k[30;1H[55[?25l[55;193H~@k[2;1H[55;193H   [3;1H[?25h[?25l[55;193H~@k[3;1H[55;193H   [4;1H[?25h[?25l[55;193H~@k[4;1H[55;193H   [5;1H[?25h[?25l[55;193H~@k[5;1H[55;193H   [6;1H[?25h[?25l[55;193H~@k[6;1H[55;193H   [7;1H[?25h[?25l[55;193H~@k[7;1H[55;193H   [8;1H[?25h[?25l[55;193H~@k[8;1H[55;193H   [9;1H[?25h[?25l[55;193H~@k[9;1H[55;193H   [10;1H[?25h[?25l[55;193H~@k[10;1H[55;193H   [11;1H[?25h[?25l[55;193H~@k[11;1H[55;193H   [12;1H[?25h[?25l[55;193H~@k[12;1H[55;193H   [13;1H[?25h[?25l[55;193H~@k[13;1H[55;193H   [14;1H[?25h[?25l[55;193H~@k[14;1H[55;193H   [15;1H[?25h[?25l[55;193H~@k[15;1H[55;193H   [16;1H[?25h[?25l[55;193H~@k[16;1H[55;193H   [17;1H[?25h[?25l[55;193H~@k[17;1H[55;193H   [18;1H[?25h[?25l[55;193H~@k[18;1H[55;193H   [19;1H[?25h[?25l[55;193H~@k[19;1H[55;193H   [20;1H[?25h[?25l[55;193H~@k[20;1H[55;193H   [21;1H[?25h[?25l[55;193H~@k[21;1H[55;193H   [22;1H[?25h[?25l[55;193H~@k[22;1H[55;193H   [23;1H[?25h[?25l[55;193H~@k[23;1H[55;193H   [24;1H[?25h[?25l[55;193H~@k[24;1H[55;193H   [25;1H[?25h[?25l[55;193H~@k[25;1H[55;193H   [26;1H[?25h[?25l[55;193H~@k[26;1H[55;193H   [27;1H[?25h[?25l[55;193H~@k[27;1H[55;193H   [28;1H[?25h[?25l[55;193H~@k[28;1H[55;193H   [29;1H[?25h[?25l[55;193H~@k[29;1H[55;193H   [30;1H[?25h[?25l[55;193H~@k[vi .envbye    uvicorn server:app --port 8000 --reload[39Dcd src/tac                             [29D[10Duvicorn server:app --port 8000 --reload[39Dsource .venv/bin/activate              [14D[25Duvicorn server:app --port 8000 --reload[39Dcd src/tac                             [29D[10Duvicorn server:app --port 8000 --reload[39Dbye                                    [36Dvi .env       ssource .env[?2004l
-.env:62: command not found: Adherence
-.env:71: command not found: course!
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node[0m[27m[24m[Jschekka@FR20VGXKCG healthcare-outreach-node % [K[?2004hsource .env[?2004l
-.env:71: command not found: course!
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node[0m[27m[24m[Jschekka@FR20VGXKCG healthcare-outreach-node % [K[?2004hsource .env[?2004l
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node[0m[27m[24m[Jschekka@FR20VGXKCG healthcare-outreach-node % [K[?2004h[7mcurl -s -o /dev/null -w "%{http_code}\n" \[27m
-[7m  -u "$TWILIO_API_KEY:$TWILIO_API_SECRET" \[27m[K
-[7m  "https://conversations.twilio.com/v2/ControlPlane/Configurations/$TWILIO_CONVERSATION_CONFIGURATION_ID"[27m[K[A[A[59D[27mc[27mu[27mr[27ml[27m [27m-[27ms[27m [27m-[27mo[27m [27m/[27md[27me[27mv[27m/[27mn[27mu[27ml[27ml[27m [27m-[27mw[27m [27m"[27m%[27m{[27mh[27mt[27mt[27mp[27m_[27mc[27mo[27md[27me[27m}[27m\[27mn[27m"[27m [27m\[1B[27m [27m [27m-[27mu[27m [27m"[27m$[27mT[27mW[27mI[27mL[27mI[27mO[27m_[27mA[27mP[27mI[27m_[27mK[27mE[27mY[27m:[27m$[27mT[27mW[27mI[27mL[27mI[27mO[27m_[27mA[27mP[27mI[27m_[27mS[27mE[27mC[27mR[27mE[27mT[27m"[27m [27m\[1B[27m [27m [27m"[27mh[27mt[27mt[27mp[27ms[27m:[27m/[27m/[27mc[27mo[27mn[27mv[27me[27mr[27ms[27ma[27mt[27mi[27mo[27mn[27ms[27m.[27mt[27mw[27mi[27ml[27mi[27mo[27m.[27mc[27mo[27mm[27m/[27mv[27m2[27m/[27mC[27mo[27mn[27mt[27mr[27mo[27ml[27mP[27ml[27ma[27mn[27me[27m/[27mC[27mo[27mn[27mf[27mi[27mg[27mu[27mr[27ma[27mt[27mi[27mo[27mn[27ms[27m/[27m$[27mT[27mW[27mI[27mL[27mI[27mO[27m_[27mC[27mO[27mN[27mV[27mE[27mR[27mS[27mA[27mT[27mI[27mO[27mN[27m_[27mC[27mO[27mN[27mF[27mI[27mG[27mU[27mR[27mA[27mT[27mI[27mO[27mN[27m_[27mI[27mD[27m"[?2004l
-401
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node[0m[27m[24m[Jschekka@FR20VGXKCG healthcare-outreach-node % [K[?2004hcurl -s -o /dev/null -w "%{http_code}\n" \
-  -u "$TWILIO_API_KEY:$TWILIO_API_SECRET" \[K
-  "https://conversations.twilio.com/v2/ControlPlane/Configurations/$TWILIO_CONVERSATION_CONFIGURATION_ID"[K[A[A[46Csource .env                               [1B[K[1B[K[A[A[57C[?2004l[1B[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node[0m[27m[24m[Jschekka@FR20VGXKCG healthcare-outreach-node % [K[?2004hsource .env[11Dcurl -s -o /dev/null -w "%{http_code}\n" \
-  -u "$TWILIO_API_KEY:$TWILIO_API_SECRET" \[K
-  "https://conversations.twilio.com/v2/ControlPlane/Configurations/$TWILIO_CONVERSATION_CONFIGURATION_ID"[K[?2004l
-401
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node[0m[27m[24m[Jschekka@FR20VGXKCG healthcare-outreach-node % [K[?2004hccd src[1m/[0m[0m/r\ t  t
-[Jtac/             tac-hls-server/  tac-old/         types.ts[A[0m[27m[24m[46Ccd src/t[Ka
-[J[A[55Cc[?2004l
-[J[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac[0m[27m[24m[Jschekka@FR20VGXKCG tac % [K[?2004hcd src/tac[10Dcurl -s -o /dev/null -w "%{http_code}\n" \
-  -u "$TWILIO_API_KEY:$TWILIO_API_SECRET" \[K
-  "https://conversations.twilio.com/v2/ControlPlane/Configurations/$TWILIO_CONVERSATION_CONFIGURATION_ID"[K[A[A[25Csource .env                               [1B[K[1B[K[A[A[36C[11Dcurl -s -o /dev/null -w "%{http_code}\n" \[1B  -u "$TWILIO_API_KEY:$TWILIO_API_SECRET" \[K[1B  "https://conversations.twilio.com/v2/ControlPlane/Configurations/$TWILIO_CONVERSATION_CONFIGURATION_ID"[K[A[A[25Csource .env                               [1B[K[1B[K[A[A[36C[11Dvi .env    bye    uvicorn server:app --port 8000 --reload[39Dcd src/tac                             [29D[10Duvicorn server:app --port 8000 --reload[39Dsource .venv/bin/activate              [14D[25Dcd healthcare-outreach-node[27Dsource .venv/bin/activate  [?2004l[1B[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac[0m[27m[24m[J(.venv) schekka@FR20VGXKCG tac % [K[?2004hsource .venv/bin/activate[25Dcd src/tac               [15D[10Dsource .venv/bin/activate[25Dcd src/tac               [15D[10Dcurl -s -o /dev/null -w "%{http_code}\n" \
-  -u "$TWILIO_API_KEY:$TWILIO_API_SECRET" \[K
-  "https://conversations.twilio.com/v2/ControlPlane/Configurations/$TWILIO_CONVERSATION_CONFIGURATION_ID"[K[A[1B[A[A[33Ccd src/tac                                [1B[K[1B[K[A[A[43C[10Dsource .venv/bin/activate[25D                         [25Dsource .venv/bin/activate[25Dcd src/tac               [15D[10Dcurl -s -o /dev/null -w "%{http_code}\n" \[1B  -u "$TWILIO_API_KEY:$TWILIO_API_SECRET" \[K[1B  "https://conversations.twilio.com/v2/ControlPlane/Configurations/$TWILIO_CONVERSA[11Dvi .env    bye    uvicorn server:app --port 8000 --reload[39Dcd src/tac                             [29D[10Duvicorn server:app --port 8000 --reload[39Dsource .venv/bin/activate              [14D[25Dcd healthcare-outreach-node[27Dsource .venv/bin/activate  [?2004l[1B[1m[7m%[27m[1m[0m                                                                                                               uvicorn server:app --port 8000 --reload[?2004l[1B[32mINFO[0m:     Will watch for changes in these directories: ['/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac']
-INFO:httpx:HTTP Request: GET https://conversations.twilio.com/v2/ControlPlane/Configurations/conv_configuration_01knn5ke4pefxs9t0mk99ce39x "HTTP/1.1 401 Unauthorized"
-2026-09-30 18:27:50 - tac.ConversationClient - ERROR - Failed to get configuration: Client error '401 Unauthorized' for url 'https://conversations.twilio.com/v2/ControlPlane/Configurations/conv_configuration_01knn5ke4pefxs9t0mk99ce39x'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401
-URL: https://conversations.twilio.com/v2/ControlPlane/Configurations/conv_configuration_01knn5ke4pefxs9t0mk99ce39x
-Response: {"code":20003,"message":"authentication failed, account AC72eac3bee04c1635c4e01335ece799c7 with status 4 is not active","more_info":"https://www.twilio.com/docs/errors/20003","status":401}
-Traceback (most recent call last):
-  File [35m"/Users/schekka/projects/sierra-projects/twilio-agent-connect-python/src/tac/core/tac.py"[0m, line [35m60[0m, in [35m__init__[0m
-    configuration = self.conversation_orchestrator_client.get_configuration(
-        self.config.conversation_configuration_id
-    )
-  File [35m"/Users/schekka/projects/sierra-projects/twilio-agent-connect-python/src/tac/context/conversation.py"[0m, line [35m601[0m, in [35mget_configuration[0m
-    [31mresponse.raise_for_status[0m[1;31m()[0m
-    [31m~~~~~~~~~~~~~~~~~~~~~~~~~[0m[1;31m^^[0m
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/lib/python3.14/site-packages/httpx/_models.py"[0m, line [35m829[0m, in [35mraise_for_status[0m
-    raise HTTPStatusError(message, request=request, response=self)
-[1;35mhttpx.HTTPStatusError[0m: [35mClient error '401 Unauthorized' for url 'https://conversations.twilio.com/v2/ControlPlane/Configurations/conv_configuration_01knn5ke4pefxs9t0mk99ce39x'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401[0m
-
-The above exception was the direct cause of the following exception:
-
-Traceback (most recent call last):
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/bin/uvicorn"[0m, line [35m6[0m, in [35m<module>[0m
-    sys.exit([31mmain[0m[1;31m()[0m)
-             [31m~~~~[0m[1;31m^^[0m
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/lib/python3.14/site-packages/click/core.py"[0m, line [35m1524[0m, in [35m__call__[0m
-    return [31mself.main[0m[1;31m(*args, **kwargs)[0m
-           [31m~~~~~~~~~[0m[1;31m^^^^^^^^^^^^^^^^^[0m
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/lib/python3.14/site-packages/click/core.py"[0m, line [35m1445[0m, in [35mmain[0m
-    rv = self.invoke(ctx)
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/lib/python3.14/site-packages/click/core.py"[0m, line [35m1308[0m, in [35minvoke[0m
-    return [31mctx.invoke[0m[1;31m(self.callback, **ctx.params)[0m
-           [31m~~~~~~~~~~[0m[1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/lib/python3.14/site-packages/click/core.py"[0m, line [35m877[0m, in [35minvoke[0m
-    return callback(*args, **kwargs)
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/lib/python3.14/site-packages/ll last):
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/bin/uvicorn"[0m, line [35m6[0m, in [35m<module>[0m
-    sys.exit([31mmain[0m[1;31m()[0m)
-             [31m~~~~[0m[1;31m^^[0m
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/lib/python3.14/site-packages/click/core.py"[0m, line [35m1524[0m, in [35m__call__[0m
-    retuib/python3.14/site-packages/uvicorn/main.py"[0m, line [35m609[0m, in [35mrun[0m
-    [31mconfig.load_app[0m[1;31m()[0m
-    [31m~~~~~~~~~~~~~~~[0m[1;31m^^[0m
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/lib/python3.14/site-packages/uvicorn/config.py"[0m, line [35m415[0m, in [35mload_app[0m
-    return import_from_string(self.app)
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/.venv/lib/python3.14/site-packages/uvicorn/importer.py"[0m, line [35m19[0m, in [35mimport_from_string[0m
-    module = importlib.import_module(module_str)
-  File [35m"/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/importlib/__init__.py"[0m, line [35m88[0m, in [35mimport_module[0m
-    return [31m_bootstrap._gcd_import[0m[1;31m(name[level:], package, level)[0m
-           [31m~~~~~~~~~~~~~~~~~~~~~~[0m[1;31m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
-  File [35m"<frozen importlib._bootstrap>"[0m, line [35m1406[0m, in [35m_gcd_import[0m
-  File [35m"<frozen importlib._bootstrap>"[0m, line [35m1371[0m, in [35m_find_and_load[0m
-  File [35m"<frozen importlib._bootstrap>"[0m, line [35m1342[0m, in [35m_find_and_load_unlocked[0m
-  File [35m"<frozen importlib._bootstrap>"[0m, line [35m938[0m, in [35m_load_unlocked[0m
-  File [35m"<frozen importlib._bootstrap_external>"[0m, line [35m759[0m, in [35mexec_module[0m
-  File [35m"<frozen importlib._bootstrap>"[0m, line [35m491[0m, in [35m_call_with_frames_removed[0m
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/server.py"[0m, line [35m72[0m, in [35m<module>[0m
-    tac = TAC(config=TACConfig.from_env())
-  File [35m"/Users/schekka/projects/sierra-projects/twilio-agent-connect-python/src/tac/core/tac.py"[0m, line [35m64[0m, in [35m__init__[0m
-    raise ValueError(
-    ...<3 lines>...
-    ) from e
-[1;35mValueError[0m: [35mFailed to fetch Conversation Orchestrator configuration: Client error '401 Unauthorized' for url 'https://conversations.twilio.com/v2/ControlPlane/Configurations/conv_configuration_01knn5ke4pefxs9t0mk99ce39x'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401. Please check your conversation_configuration_id and credentials, or omit conversation_configuration_id to run in ConversationRelay-only mode.[0m
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac[0m[27m[24m[J(.venv) schekka@FR20VGXKCG tac % [K[?2004hternal>"[0m, line [35m759[0m, in [35mexec_module[0m
-  File [35m"<frozen importlib._bootstrap>"[0m, line [35m491[0m, in [35m_call_with_frames_removed[0m
-  File [35m"/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac/server.py"[0m, line [35m72[0m, in [35m<module>[0m
-    tac = TAC(config=TACConfig.from_env())
-  File [35m"/Users/schekka/projects/sierra-projects/twilio-agent-connect-python/src/tac/core/tac.py"[0m, line [35m64[0m, in [35m__init__[0m
-    raise ValueError(
-    ...<3 lines>...
-    ) from e
-[1;35mValueError[0m: [35mFailed to fetch Conversation Orchestrator configuration: Client error '401 Unauthorized' for url 'https://conversations.twilio.com/v2/ControlPlane/Configurations/conv_configuration_01knn5ke4pefxs9t0mk99ce39x'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401. Please check your conversation_configuration_id and credentials, or omit conversation_configuration_id to run in ConversationRelay-only mode.[0m
-[1m[7m%[27m[1m[0m                                                                                                                                                                                                           ]7;file://FR20VGXKCG/Users/schekka/projects/sierra-projects/healthcare-outreach-node/src/tac[0m[27m[24m[J(.venv) schekka@FR20VGXKCG tac % [K[?2004h
