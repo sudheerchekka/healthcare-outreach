@@ -5,7 +5,8 @@ import { Twilio, jwt as twilioJwt } from 'twilio';
 import * as path from 'path';
 import { readFile, writeFile } from 'fs/promises';
 import type { AppConfig } from '../../../app-config';
-import type { MemberRow } from '../../../types';
+import type { MemberRow, OutboundContext } from '../../../types';
+import { buildGreeting } from '../../../prompts';
 import {
   normalizePhone,
   lookupProfileId,
@@ -331,6 +332,57 @@ export function registerAppRoutes(app: FastifyInstance, cfg: AppConfig, tacPort:
     }
   });
 
+
+  // ── AI-agent outbound call (ConversationRelay via TAC) ────────────────────
+  // Pages served under `${px}/*.html` use the relative URL `api/outbound-call`,
+  // which resolves to this route. (The shared `/api/outbound-call` in index.ts is
+  // the TAC → Node IPC endpoint, used by schedule_call.)
+  app.post(`${px}/api/outbound-call`, async (req, reply) => {
+    const { name = 'Member', phone = '', goal = '', goalDesc = '', profileId = '' } =
+      req.body as Record<string, string>;
+    const memberPhone = normalizePhone(phone);
+    const dialTo = cfg.outboundCallTo || memberPhone;
+    if (!dialTo) return reply.status(400).send({ success: false, error: 'No destination number' });
+    const greeting = buildGreeting(name, goal, goalDesc);
+
+    if (profileId) {
+      ciLiveResults.delete(profileId);
+      nbrResults.delete(profileId);
+      ciFirstConvId.delete(profileId);
+      transcriptMessages.delete(profileId);
+      const resetEvent = JSON.stringify({ operators: cfg.ciOperators, results: {}, nbr: [] });
+      ciSseClients.get(profileId)?.forEach(c => c.write(`data: ${resetEvent}\n\n`));
+      transcriptSseClients.get(profileId)?.forEach(c => c.write(`event: reset\ndata: {}\n\n`));
+      console.log(`[${cfg.id}][outbound-call] cleared NBR, transcript, operator results for profileId=${profileId}`);
+    }
+
+    const convId = `outbound-${memberPhone}-${Date.now()}`;
+    const ctx: OutboundContext & { conv_id: string } = { conv_id: convId, name, goal, goalDesc, phone: memberPhone, greeting };
+
+    try {
+      await fetch(`http://localhost:${tacPort}${tacPx}/set-outbound-context`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(ctx),
+      });
+    } catch (e) {
+      console.error(`[${cfg.id}][outbound-call] failed to set outbound context:`, e);
+      return reply.status(502).send({ success: false, error: 'TAC server unreachable' });
+    }
+
+    if (!twilioClient) return reply.status(500).send({ success: false, error: 'Twilio not configured' });
+
+    const params = new URLSearchParams({ conv_id: convId });
+    const twimlUrl = `https://${cfg.voiceDomain}${tacPx}/twiml-outbound?${params}`;
+
+    try {
+      const call = await twilioClient.calls.create({ to: dialTo, from: cfg.phoneNumber, url: twimlUrl });
+      console.log(`[${cfg.id}][outbound-call] initiated member=${name} callSid=${call.sid} conv_id=${convId}`);
+      reply.send({ success: true, call_sid: call.sid });
+    } catch (e) {
+      reply.status(500).send({ success: false, error: String(e) });
+    }
+  });
 
   app.post(`${px}/api/browser-call`, async (req, reply) => {
     const { phone = '', profileId = '', name = '' } = req.body as Record<string, string>;
